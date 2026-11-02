@@ -246,10 +246,153 @@ test("Express: arrow-function handlers in factories and class fields, imported t
   const a = await scan(root);
   const sym = await buildSymbolIndex(root, a);
   const g = await buildCallGraph(root, a, sym);
-  const want: Record<string, string> = { "/:id/route": "route", "/:id/latest": "latest", "/trips/:id/route": "TripController.route", "/trips": "TripController.list" };
+  const want: Record<string, string> = { "/:id/route": "createTelematicsController.route", "/:id/latest": "createTelematicsController.latest", "/trips/:id/route": "TripController.route", "/trips": "TripController.list" };
   for (const r of await listRoutes(root, a)) {
     const names = traceRoute(g, sym, r).steps.map((s) => s.name);
     assert.equal(names[0], want[r.path], `${r.path}: ${names.join(" > ")}`);
     assert.ok(names.includes("VehicleService.history"), `${r.path} reaches the service: ${names.join(" > ")}`);
   }
+});
+
+test("Express: injected services are followed through declared types to the service and the provider behind it", async () => {
+  const root = await makeTree({
+    "package.json": JSON.stringify({ dependencies: { express: "^4" } }),
+    "src/guard.ts": `export const guarded = (a: string, b: string, c: string, fn: Function, activity?: string) => fn;\n`,
+    // The provider: an interface whose members are other interfaces, implemented by factories declared to return them.
+    // The demo copy elsewhere implements the same interface; the one beside the interface is the real one.
+    "src/pricing/rules.ts": `export interface PriceRules {\n  quote(id: string): string[];\n}\nexport const priceRules = (): PriceRules =>\n  Object.freeze({\n    quote: (id: string) => [id],\n  });\n`,
+    "src/pricing/provider.ts": `import type { PriceRules } from "./rules.js";\nexport interface PricingProvider {\n  readonly rules: PriceRules;\n}\n`,
+    "src/demo/rules.ts": `import type { PriceRules } from "../pricing/rules.js";\nexport const demoRules = (): PriceRules => ({\n  quote: (id: string) => [id, "demo"],\n});\n`,
+    "src/orders/services/checkout.ts": `import type { PricingProvider } from "../../pricing/provider.js";\nexport const totalOf = (x: string[]) => x;\nexport const createCheckout = (provider: PricingProvider) =>\n  Object.freeze({\n    async forCart(id: string) {\n      return totalOf(provider.rules.quote(id));\n    },\n  });\n`,
+    "src/orders/services/catalog.ts": `export interface Catalog {\n  page(id: string): string[];\n}\nconst loadPage = (id: string) => [id];\nexport const createCatalog = (): Catalog => ({\n  page(id: string) {\n    return loadPage(id);\n  },\n});\n`,
+    "src/orders/services/index.ts": `import { createCheckout } from "./checkout.js";\nimport { createCatalog, type Catalog } from "./catalog.js";\nexport interface OrderServices {\n  readonly checkout: ReturnType<typeof createCheckout>;\n  readonly catalog: Catalog;\n}\n`,
+    // A typed object built inside a factory, and a call result used as the receiver.
+    "src/commands/services.ts": `import type { PricingProvider } from "../pricing/provider.js";\nexport interface CommandServices {\n  send(id: string): Promise<string[]>;\n}\nexport const createCommandServices = (provider: PricingProvider | null): CommandServices => {\n  const configured = (): PricingProvider => provider!;\n  const services: CommandServices = {\n    send: async (id) => configured().rules.quote(id),\n  };\n  return Object.freeze(services);\n};\n`,
+    "src/orders/controller.ts": `import type { OrderServices } from "./services/index.js";\nimport type { CommandServices } from "../commands/services.js";\nexport const createOrderController = (orders: OrderServices, commands: CommandServices) => ({\n  async show(principal: unknown, request: any, response: any) {\n    response.json(await orders.checkout.forCart(request.params.id));\n  },\n  async list(principal: unknown, request: any, response: any) {\n    response.json(orders.catalog.page(request.params.id));\n  },\n  async send(principal: unknown, request: any, response: any) {\n    response.json(await commands.send(request.params.id));\n  },\n});\n`,
+    // Constructor injection: \`find\` is too common to link by name, and \`lastLogin\` exists twice.
+    "src/users/user.service.ts": `export class UserService {\n  find(id: string) { return id; }\n  lastLogin(id: string) { return id; }\n}\n`,
+    "src/users/account.service.ts": `export class AccountService {\n  lastLogin(id: string) { return id; }\n}\n`,
+    "src/users/profile.controller.ts": `import { UserService } from "./user.service";\nexport class ProfileController {\n  constructor(private users: UserService) {}\n  async route(principal: unknown, request: any, response: any) {\n    const v = this.users.find(request.params.id);\n    response.json(this.users.lastLogin(Date.parse(v) ? [v].slice(0)[0]! : ""));\n  }\n}\n`,
+    "src/http/validate.ts": `export const parse = (x: string) => x;\nexport const slice = (x: string) => x;\n`,
+    "src/routes.ts": `import { Router } from "express";\nimport { guarded } from "./guard";\nimport { createOrderController } from "./orders/controller";\nimport { ProfileController } from "./users/profile.controller";\nimport { UserService } from "./users/user.service";\nexport function routes(orders: any, commands: any) {\n  const router = Router();\n  const controller = createOrderController(orders, commands);\n  const profiles = new ProfileController(new UserService());\n  router.get("/:id/checkout", guarded("web", "read", "Checkout", controller.show));\n  router.get("/", guarded("web", "read", "Order", controller.list));\n  router.post("/:id/commands", guarded("web", "manage", "Command", controller.send, "command.send"));\n  router.get("/profiles/:id", guarded("web", "read", "Profile", profiles.route.bind(profiles)));\n  return router;\n}\n`,
+  });
+  const a = await scan(root);
+  const sym = await buildSymbolIndex(root, a);
+  const g = await buildCallGraph(root, a, sym);
+  const routes = await listRoutes(root, a);
+  const trace = (p: string) => traceRoute(g, sym, routes.find((x) => x.path === p)!).steps;
+  const names = (p: string) => trace(p).map((s) => s.name);
+
+  assert.deepEqual(names("/:id/checkout"), ["createOrderController.show", "createCheckout.forCart", "priceRules.quote", "totalOf"]);
+  assert.ok(trace("/:id/checkout").slice(1, 3).every((s) => s.via === "type"), "followed through types, not guessed by name");
+  assert.deepEqual(names("/"), ["createOrderController.list", "createCatalog.page", "loadPage"]);
+  assert.deepEqual(names("/:id/commands"), ["createOrderController.send", "createCommandServices.send", "configured", "priceRules.quote"]);
+  assert.deepEqual(names("/profiles/:id"), ["ProfileController.route", "UserService.find", "UserService.lastLogin"], "Date.parse and [v].slice are not the repo's parse and slice");
+});
+
+test("Express: the handler is the function among a wrapper's arguments, whatever comes after it", async () => {
+  const root = await makeTree({
+    "package.json": JSON.stringify({ dependencies: { express: "^4" } }),
+    "src/guard.ts": `export const guarded = (a: string, b: string, c: string, fn: Function, activity?: unknown) => fn;\nexport const publicRoute = (why: string, fn: Function, activity?: unknown) => fn;\nexport const noAudit = (reason: string) => ({ key: false, reason });\nexport const curried = (a: string, b: string) => (fn: Function) => fn;\n`,
+    "src/profiles/service.ts": `export function loadProfile(id: string) {\n  return [id];\n}\n`,
+    "src/profiles/controller.ts": `import { loadProfile } from "./service";\nexport class ProfileController {\n  route(req: any, res: any) {\n    res.json(loadProfile(req.params.id));\n  }\n  login(req: any, res: any) {\n    res.json(loadProfile("me"));\n  }\n}\n`,
+    "src/profiles/routes.ts": `import { Router } from "express";\nimport { guarded, publicRoute, noAudit, curried } from "../guard";\nimport { ProfileController } from "./controller";\nexport const router = Router();\nconst profiles = new ProfileController();\nconst quiet = noAudit("reads only");\nrouter.post("/a", guarded("web", "manage", "Profile", profiles.route, "profile.create"));\nrouter.post("/b", publicRoute("credential entry point", profiles.login, noAudit("the auth service records it")));\nrouter.post("/c", guarded("mobile", "update", "Profile", profiles.route, quiet));\nrouter.get("/d", curried("web", "read")(profiles.route));\nrouter.get("/e", profiles.route.bind(profiles));\nrouter.get("/f", guarded("web", "read", "Profile", profiles.route.bind(profiles)));\n`,
+  });
+  const a = await scan(root);
+  const sym = await buildSymbolIndex(root, a);
+  const g = await buildCallGraph(root, a, sym);
+  const routes = await listRoutes(root, a);
+  const at = (p: string) => routes.find((x) => x.path === p)!;
+  const want: Record<string, [string, string[] | undefined]> = {
+    "/a": ["profiles.route", ["guarded:web,manage,Profile,profile.create"]],
+    "/b": ["profiles.login", ["publicRoute:credential entry point"]],
+    "/c": ["profiles.route", ["guarded:mobile,update,Profile"]],
+    "/d": ["profiles.route", ["curried:web,read"]],
+    "/e": ["profiles.route", undefined],
+    "/f": ["profiles.route", ["guarded:web,read,Profile"]],
+  };
+  for (const [p, [handler, middleware]] of Object.entries(want)) {
+    assert.equal(at(p).handler, handler, p);
+    assert.deepEqual(at(p).middleware, middleware, p);
+    const names = traceRoute(g, sym, at(p)).steps.map((s) => s.name);
+    assert.ok(names.includes("loadProfile"), `${p}: ${names.join(" > ")}`);
+  }
+});
+
+test("a handler that's a member of a factory or an object constant can be pinned as Owner.member", async () => {
+  const root = await makeTree({
+    "package.json": JSON.stringify({ dependencies: { express: "^4" } }),
+    "src/container.ts": `export const container = { get: (name: string) => (() => name) as Function };\n`,
+    "src/reports/service.ts": `export function buildReport(id: string) {\n  return [id];\n}\nexport function archive(id: string) {\n  return [id];\n}\n`,
+    "src/reports/handlers.ts": `import { buildReport, archive } from "./service";\nexport const ReportFactory = {\n  show: async (principal: unknown, request: any, response: any) => response.json(buildReport(request.params.id)),\n};\nexport const ArchiveFactory = {\n  show: async (principal: unknown, request: any, response: any) => response.json(archive(request.params.id)),\n};\nexport function createReportController() {\n  async function download(principal: unknown, request: any, response: any) {\n    response.json(buildReport(request.params.id));\n  }\n  return { download };\n}\n`,
+    "src/reports/routes.ts": `import { Router } from "express";\nimport { container } from "../container";\nexport const router = Router();\nrouter.get("/reports/:id", container.get("reports.show"));\nrouter.get("/reports/:id/file", container.get("reports.download"));\n`,
+  });
+  const a = await scan(root);
+  const sym = await buildSymbolIndex(root, a);
+  const routes = await listRoutes(root, a);
+  const show = routes.find((x) => x.path === "/reports/:id")!;
+  const file = routes.find((x) => x.path === "/reports/:id/file")!;
+  const res = await submitEntryOverrides(root, routes, {
+    handlers: [
+      { id: show.id, file: "src/reports/handlers.ts", symbol: "show" },
+      { id: show.id, file: "src/reports/handlers.ts", symbol: "ArchiveFactory.show" },
+      { id: file.id, file: "src/reports/handlers.ts", symbol: "createReportController.download" },
+    ],
+  }, sym);
+  assert.equal(res.accepted, 2, JSON.stringify(res.rejected));
+  assert.match(res.rejected[0]!.problem, /"show" is defined more than once.*ReportFactory\.show, ArchiveFactory\.show/);
+  const g = await buildCallGraph(root, a, sym);
+  const after = await listRoutes(root, a);
+  const names = (r: Route) => traceRoute(g, sym, after.find((x) => x.id === r.id)!).steps.map((s) => s.name);
+  assert.deepEqual(names(show), ["ArchiveFactory.show", "archive"]);
+  assert.deepEqual(names(file), ["download", "buildReport"]);
+});
+
+test("a trace shares its step budget, so a deep helper early on doesn't hide the calls after it", async () => {
+  const chain = Array.from({ length: 12 }, (_, i) => `function h${i}() {\n  return ${i < 11 ? `h${i + 1}()` : "0"};\n}\n`).join("");
+  const root = await makeTree({
+    "package.json": JSON.stringify({ dependencies: { express: "^4" } }),
+    "src/app.ts": `import express from "express";\nconst app = express();\n${chain}function save() {\n  return 1;\n}\nfunction respond() {\n  return 2;\n}\nexport function handler(req: any, res: any) {\n  h0();\n  save();\n  respond();\n}\napp.get("/x", handler);\n`,
+  });
+  const a = await scan(root);
+  const sym = await buildSymbolIndex(root, a);
+  const route = (await listRoutes(root, a)).find((x) => x.path === "/x")!;
+  const t = traceRoute(await buildCallGraph(root, a, sym), sym, route, { maxSteps: 8 });
+  const names = t.steps.map((s) => s.name);
+  assert.ok(t.steps.length <= 8);
+  assert.deepEqual(names.slice(-2), ["save", "respond"], names.join(" > "));
+  assert.ok(t.truncated);
+});
+
+test("titles and pins saved under an older route id keep working when houserules reads the handler better", async () => {
+  const root = await makeTree({
+    "package.json": JSON.stringify({ dependencies: { express: "^4" } }),
+    "src/guard.ts": `export const guarded = (a: string, fn: Function, activity?: string) => fn;\nexport const cached = (key: string) => (fn: Function) => fn;\n`,
+    "src/orders/service.ts": `export function load(id: string) {\n  return [id];\n}\n`,
+    "src/orders/controller.ts": `import { load } from "./service";\nexport const createController = () => ({\n  create(principal: unknown, request: any, response: any) {\n    response.json(load(request.params.id));\n  },\n});\n`,
+    "src/orders/routes.ts": `import { Router } from "express";\nimport { guarded } from "../guard";\nimport { createController } from "./controller";\nimport { registry } from "./registry";\nexport const router = Router();\nconst controller = createController();\nrouter.post("/orders", guarded("web", controller.create, "order.create"));\nrouter.get("/orders/:id", registry.lookup("orders.show")(1));\n`,
+    "src/orders/registry.ts": `export const registry = { lookup: (name: string) => (n: number) => (req: any, res: any) => res.json(n) };\nexport function show(req: any, res: any) {\n  res.json(1);\n}\n`,
+    // Saved by an older houserules, which read both handlers as wrapper calls.
+    ".houserules/entrypoints.json": JSON.stringify({
+      titles: { "api:POST:/orders:src/orders/routes.ts:guarded(…)": "Add an order", "api:GET:/orders/:id:src/orders/routes.ts:registry.lookup(…)": "Look up an order" },
+      handlers: {
+        "api:POST:/orders:src/orders/routes.ts:guarded(…)": { file: "src/orders/controller.ts", symbol: "createController" },
+        "api:GET:/orders/:id:src/orders/routes.ts:registry.lookup(…)": { file: "src/orders/registry.ts", symbol: "show" },
+      },
+    }),
+  });
+  const a = await scan(root);
+  const sym = await buildSymbolIndex(root, a);
+  const routes = await listRoutes(root, a);
+  const create = routes.find((x) => x.path === "/orders")!;
+  const show = routes.find((x) => x.path === "/orders/:id")!;
+  assert.equal(create.id, "api:POST:/orders:src/orders/routes.ts:controller.create");
+  assert.ok(!create.pinned, "houserules follows this one itself now, so the old pin is not needed");
+  assert.ok(show.pinned, "still unfollowed: the old pin still applies");
+  const map = buildEntryMap(routes, new Map(), a, await readEntryOverrides(root));
+  assert.equal(map.stories.get(create.id)?.title, "Add an order");
+  assert.equal(map.stories.get(show.id)?.title, "Look up an order");
+  const g = await buildCallGraph(root, a, sym);
+  assert.deepEqual(traceRoute(g, sym, create).steps.map((s) => s.name), ["createController.create", "load"]);
+  assert.equal(traceRoute(g, sym, show).steps[0]?.name, "show");
 });

@@ -29,19 +29,21 @@ export interface Trace {
 
 /**
  * What runs when an entry point is hit: a depth-first walk of the call graph from its handler.
- * Calls are visited in the order they're written, so the steps read top to bottom like the code.
+ * Calls are visited in the order they're written, so the steps read top to bottom like the code. The step budget is
+ * shared fairly between a function's calls (what one call leaves unused passes to the next), so a deep helper early
+ * on can't crowd out the calls after it: `forCart` still shows the provider read and the result after a long check.
  */
 export function traceRoute(graph: CallGraph, symbols: SymbolIndex, route: Route, opts: { maxDepth?: number; maxSteps?: number } = {}): Trace {
   const maxDepth = opts.maxDepth ?? 6;
-  const maxSteps = opts.maxSteps ?? 40;
+  const maxSteps = opts.maxSteps ?? 60;
   const start = route.inline ? inlineNode(graph, route) : handlerNode(graph, symbols, route);
   const steps: TraceStep[] = [];
   let truncated = false;
   if (!start) return { route, steps, truncated, files: [route.file], externals: [] };
 
   const shown = new Set<string>();
-  const visit = (n: GraphNode, depth: number, parent?: number, edge?: GraphEdge) => {
-    if (steps.length >= maxSteps) {
+  const visit = (n: GraphNode, depth: number, budget: number, parent?: number, edge?: GraphEdge) => {
+    if (budget <= 0 || steps.length >= maxSteps) {
       truncated = true;
       return;
     }
@@ -52,17 +54,23 @@ export function traceRoute(graph: CallGraph, symbols: SymbolIndex, route: Route,
     }) - 1;
     if (repeat || n.external) return;
     shown.add(n.id);
-    const edges = [...(graph.out.get(n.id) ?? [])].sort((a, b) => a.line - b.line || (a.end ?? 0) - (b.end ?? 0));
+    const edges = [...(graph.out.get(n.id) ?? [])].sort((a, b) => a.line - b.line || (a.end ?? 0) - (b.end ?? 0)).filter((e) => graph.nodes.has(e.to));
     if (depth >= maxDepth) {
       if (edges.length) truncated = true;
       return;
     }
-    for (const e of edges) {
-      const to = graph.nodes.get(e.to);
-      if (to) visit(to, depth + 1, idx, e);
+    let left = budget - 1;
+    for (const [i, e] of edges.entries()) {
+      if (left <= 0) {
+        truncated = true;
+        break;
+      }
+      const before = steps.length;
+      visit(graph.nodes.get(e.to)!, depth + 1, Math.max(1, Math.floor(left / (edges.length - i))), idx, e);
+      left -= steps.length - before;
     }
   };
-  visit(start, 0);
+  visit(start, 0, maxSteps);
   const files = [...new Set(steps.map((s) => s.file).filter((f): f is string => Boolean(f)))];
   const externals = [...new Set(steps.filter((s) => s.external).map((s) => s.name))];
   return { route, steps, truncated, files, externals };
@@ -82,10 +90,30 @@ function inlineNode(graph: CallGraph, route: Route): GraphNode | undefined {
 
 const TEST_FILE = /(^|\/)(tests?|__tests__|spec|specs|e2e|fixtures?)\/|\.(test|spec|e2e|integration)\.[cm]?[jt]sx?$|(^|\/)test_[^/]+\.py$|_test\.(py|go)$/i;
 
+/**
+ * A pinned `Owner.member` that has no node by that exact name: a function declared inside the factory that returns
+ * it (`createOrderController.show` → `async function show` within it), else a lone `member` in the file.
+ */
+function pinnedMember(all: GraphNode[], file: string, handler: string): GraphNode | undefined {
+  const inFile = all.filter((n) => n.file === file);
+  const dot = handler.lastIndexOf(".");
+  const member = handler.slice(dot + 1);
+  if (dot >= 0) {
+    const owner = inFile.find((n) => n.name === handler.slice(0, dot));
+    const inside = owner && inFile.find((n) => n !== owner && n.name.split(".").pop() === member && n.line! >= owner.line! && n.endLine! <= owner.endLine!);
+    if (inside) return inside;
+  }
+  const named = inFile.filter((n) => n.name === member || n.name.endsWith(`.${member}`));
+  return named.length === 1 ? named[0] : undefined;
+}
+
 function handlerNode(graph: CallGraph, symbols: SymbolIndex, route: Route): GraphNode | undefined {
   const all = [...graph.nodes.values()];
   if (route.pinned && route.handlerFile) {
-    const pinned = graph.find(route.handlerFile, route.handler) ?? all.find((n) => n.file === route.handlerFile && (n.name === route.handler || n.name.endsWith(`.${route.handler.split(".").pop()}`)));
+    // A pin naming the factory or object that holds the handler (`createProfileController` for `profiles.list`):
+    // start at the member the route file names, which is what runs.
+    const member = route.declared?.match(/\.([\w$]+)$/)?.[1];
+    const pinned = (member && graph.find(route.handlerFile, `${route.handler}.${member}`)) || graph.find(route.handlerFile, route.handler) || pinnedMember(all, route.handlerFile, route.handler);
     if (pinned) return pinned;
   }
   const inFile = all.filter((n) => n.file === route.file);

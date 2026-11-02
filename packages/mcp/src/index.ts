@@ -269,7 +269,7 @@ export function createServer(defaultRoot = process.cwd()): McpServer {
     {
       title: "Describe entry points",
       description:
-        "Names for the Entry points page: a friendly title and one-line blurb per area (area ids from list_entry_points), their order along the customer journey (1 = where a new user starts), and better titles for entry points whose generated title reads badly. Also `handlers`: for an entry point list_entry_points shows with steps 0, the function that really handles it, found by reading the route (`file` relative to the repo root, `symbol` as a function name or Class.method). houserules checks it exists and traces from it. Names, order and handlers only; what each one does always comes from the code. Merges with earlier calls.",
+        "Names for the Entry points page: a friendly title and one-line blurb per area (area ids from list_entry_points), their order along the customer journey (1 = where a new user starts), and better titles for entry points whose generated title reads badly. Also `handlers`: for an entry point list_entry_points shows with steps 0, the function that really handles it, found by reading the route (`file` relative to the repo root, `symbol` as a function name, Class.method, or owner.method for a member of a factory or object constant). houserules checks it exists and traces from it. Names, order and handlers only; what each one does always comes from the code. Merges with earlier calls.",
       inputSchema: {
         areas: z.array(z.object({ id: z.string(), title: z.string().optional(), blurb: z.string().optional(), order: z.number().int().optional() })).optional(),
         titles: z.array(z.object({ id: z.string(), title: z.string() })).optional(),
@@ -289,7 +289,7 @@ export function createServer(defaultRoot = process.cwd()): McpServer {
     {
       title: "Trace an entry point",
       description:
-        "What runs when an entry point is hit: the functions it calls, in order, resolved through imports (depth-first, up to 6 levels). Framework APIs and outside services appear as external steps. Steps linked only by name have via=\"name\".",
+        "What runs when an entry point is hit: the functions it calls, in order, resolved through imports and declared types (depth-first, up to 6 levels and 60 steps). Framework APIs and outside services appear as external steps. Steps linked only by name have via=\"name\"; via=\"type\" means followed through a typed parameter, field or interface.",
       inputSchema: { path: z.string().describe("The entry point's path as list_entry_points gives it, e.g. /product/:handle or addItem"), root: rootArg },
     },
     async ({ path: p, root }) => {

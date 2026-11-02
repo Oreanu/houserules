@@ -69,7 +69,7 @@ If the MCP server isn't connected, tell the user to run `houserules init` (from 
    Then look at every entry point with `steps: 0`: houserules couldn't follow its handler (a wrapper, a factory,
    dependency injection, a decorator…). Read the route and the code it registers, find the function that really
    handles the request, and pass it in the same call as `handlers: [{ id, file, symbol }]` (`symbol` is a function
-   name or `Class.method`). houserules rejects names that don't exist; fix and resend those. Group routes that share
+   name, `Class.method`, or `owner.method` for a member of a factory or object constant, e.g. `createOrderController.show`). houserules rejects names that don't exist; fix and resend those. Group routes that share
    a pattern and do them all, not just a sample.
 6. **Turn guidelines into checks.** For each pattern, convention or pitfall that a regex can catch honestly,
    call `submit_rules` (one call, all rules): the rule as a sentence, `files` globs, `except` globs (tests,

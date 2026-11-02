@@ -10,7 +10,7 @@ export interface SymbolDef {
   line: number; // 1-based
   endLine: number;
   exported: boolean;
-  container?: string; // enclosing class, for methods
+  container?: string; // enclosing class for methods, or the factory/object that owns an object member
 }
 
 type Grammar = "typescript" | "tsx" | "javascript" | "python" | "java" | "php";
@@ -144,9 +144,12 @@ export async function extractSymbols(rel: string, text: string): Promise<SymbolD
       const kind = def.name as SymbolKind;
       const node = def.node;
       if (kind === "variable" && !isTopLevel(node)) continue;
-      if (/^(pair|public_field_definition|field_definition)$/.test(node.type) && !isRequestHandler(node)) continue;
+      // Object members belong to the factory or object that owns them (`createCheckout` → `{ forCart() {} }`),
+      // so `createCheckout.forCart` names one function even when several factories share method names.
+      const owner = /^(pair|method_definition)$/.test(node.type) ? objectOwner(node) : undefined;
+      if (/^(pair|public_field_definition|field_definition)$/.test(node.type) && !isRequestHandler(node) && !owner) continue;
 
-      const container = enclosingClass(node);
+      const container = enclosingClass(node) ?? owner;
       const sym: SymbolDef = {
         name: name.node.text,
         kind: kind === "function" && container && grammar === "python" ? "method" : kind,
@@ -175,6 +178,69 @@ function isRequestHandler(node: TSNode): boolean {
   const params = fn?.childForFieldName("parameters") ?? fn?.childForFieldName("parameter");
   const first = (params?.type === "identifier" ? params : params?.namedChildren[0])?.text ?? "";
   return /^(_?req|request|ctx|context|c)\b/.test(first.replace(/^\{.*$/s, ""));
+}
+
+/**
+ * The top-level name that owns an object member: the variable an object literal is assigned to
+ * (`export const controller = { list() {} }`), or the function that returns it, directly or through
+ * `Object.freeze(…)` (`const createCheckout = (deps) => Object.freeze({ forCart() {} })`). Objects anywhere else
+ * (arguments, nested objects, class bodies) have no owner, so callbacks stay part of the function around them.
+ */
+export function objectOwner(node: TSNode): string | undefined {
+  const obj = node.parent;
+  if (obj?.type !== "object") return undefined;
+  let child: TSNode = obj;
+  for (let p = obj.parent; p; child = p, p = p.parent) {
+    switch (p.type) {
+      case "parenthesized_expression":
+      case "as_expression":
+      case "satisfies_expression":
+      case "non_null_expression":
+      case "return_statement":
+        continue;
+      case "arguments": {
+        const call = p.parent;
+        if (call?.type !== "call_expression" || !/^Object\.(freeze|seal|assign)$/.test(call.childForFieldName("function")?.text ?? "")) return undefined;
+        continue;
+      }
+      case "call_expression":
+        continue; // reached through the Object.freeze arguments above
+      case "statement_block":
+        // Only a function's own body, and only through its `return`.
+        if (child.type !== "return_statement" || !/^(arrow_function|function_expression|function|function_declaration|generator_function_declaration)$/.test(p.parent?.type ?? "")) return undefined;
+        continue;
+      case "arrow_function":
+      case "function_expression":
+      case "function":
+        if (p.childForFieldName("body")?.startIndex !== child.startIndex) return undefined;
+        continue;
+      case "function_declaration":
+      case "generator_function_declaration":
+        return isTopLevel(p) ? p.childForFieldName("name")?.text : undefined;
+      case "variable_declarator": {
+        if (p.childForFieldName("value")?.startIndex !== child.startIndex) return undefined;
+        const decl = p.parent;
+        const name = p.childForFieldName("name");
+        if (decl && isTopLevel(decl)) return name?.type === "identifier" ? name.text : undefined;
+        // `const services: CommandServices = { send: async (…) => … }` inside a factory: a typed object is an
+        // implementation, owned by the factory that builds it. Untyped local objects (options, callbacks) are not.
+        return p.childForFieldName("type") ? factoryName(p) : undefined;
+      }
+      default:
+        return undefined;
+    }
+  }
+  return undefined;
+}
+
+/** The top-level function a node sits in: `function createX() {…}` or `const createX = (…) => {…}`. */
+function factoryName(node: TSNode): string | undefined {
+  let fn: TSNode | null = null;
+  for (let p = node.parent; p; p = p.parent) if (/^(arrow_function|function_expression|function|function_declaration|generator_function_declaration)$/.test(p.type)) fn = p;
+  if (!fn) return undefined;
+  if (/^(function_declaration|generator_function_declaration)$/.test(fn.type)) return isTopLevel(fn) ? fn.childForFieldName("name")?.text : undefined;
+  const decl = fn.parent?.type === "variable_declarator" ? fn.parent : null;
+  return decl?.parent && isTopLevel(decl.parent) && decl.childForFieldName("name")?.type === "identifier" ? decl.childForFieldName("name")!.text : undefined;
 }
 
 function isTopLevel(node: TSNode): boolean {

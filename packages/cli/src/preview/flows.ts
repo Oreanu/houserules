@@ -200,7 +200,8 @@ function stepLabel(s: TraceStep): string {
   const words = (x: string) => x.replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/[_-]+/g, " ").toLowerCase().split(" ").filter(Boolean);
   if (!method || method === "__invoke" || method === "handle") return s.kind === "render" ? `Render ${cls}` : s.kind === "new" ? `Create ${words(cls).join(" ")}` : `Run ${words(cls).join(" ")}`;
   const w = words(method);
-  const text = w.length === 1 ? `${w[0]} ${words(cls).join(" ")}` : w.join(" ");
+  // A factory's member reads as the thing it makes: createOrderController.show → "Show order controller".
+  const text = w.length === 1 ? `${w[0]} ${words(cls.replace(/^(create|make|build|new)(?=[A-Z])/, "")).join(" ")}` : w.join(" ");
   return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
