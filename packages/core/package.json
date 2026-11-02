@@ -1,0 +1,23 @@
+{
+  "name": "@houserules/core",
+  "version": "0.0.1",
+  "description": "houserules engine: detects agent setups and scans a repository into analysis.json.",
+  "license": "MIT",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@vscode/tree-sitter-wasm": "^0.3.1",
+    "ignore": "^7.0.14",
+    "smol-toml": "^1.9.1"
+  }
+}

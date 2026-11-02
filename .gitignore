@@ -1,0 +1,12 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.houserules/cache/
+evals/.repos/
+evals/results/
+# Private: questions and runs against private repos stay out of git (start from questions.example.json)
+evals/agent-bench/questions.json
+evals/agent-bench/results/
+# houserules' own output when it scans itself
+.houserules/
+.DS_Store

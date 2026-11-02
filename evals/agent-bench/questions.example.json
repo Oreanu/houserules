@@ -1,0 +1,25 @@
+{
+  "name": "your-repo",
+  "repo": "/absolute/path/to/your/repo",
+  "notes": "Copy this file to questions.json (kept out of git) and replace the repo and questions with your own. Establish every answer by reading the code yourself.",
+  "questions": [
+    {
+      "id": "q01",
+      "kind": "flow",
+      "difficulty": "medium",
+      "question": "What happens when a signed-in user cancels a booking through the API? Walk through the route, the checks and the side effects.",
+      "answer": "Write the gold answer here, in a few sentences, citing the classes and methods involved.",
+      "facts": ["BookingController", "cancel\\(", "can:update,booking"],
+      "files": ["app/Http/Controllers/BookingController.php", "app/Models/Booking.php"]
+    },
+    {
+      "id": "q02",
+      "kind": "rule",
+      "difficulty": "easy",
+      "question": "Where should a new queued job put its work, and which queue names are allowed?",
+      "answer": "Write the gold answer here.",
+      "facts": ["config/queue.php", "ShouldQueue"],
+      "files": ["config/queue.php"]
+    }
+  ]
+}

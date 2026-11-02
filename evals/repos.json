@@ -1,0 +1,77 @@
+[
+  {
+    "name": "commerce",
+    "url": "https://github.com/vercel/commerce",
+    "stack": "nextjs"
+  },
+  {
+    "name": "documenso",
+    "url": "https://github.com/documenso/documenso",
+    "stack": "nextjs",
+    "note": "turborepo monorepo with internal @documenso/* packages"
+  },
+  {
+    "name": "bakerydemo",
+    "url": "https://github.com/wagtail/bakerydemo",
+    "stack": "django"
+  },
+  {
+    "name": "netbox",
+    "url": "https://github.com/netbox-community/netbox",
+    "stack": "django",
+    "note": "large Django app, source under netbox/"
+  },
+  {
+    "name": "spring-petclinic",
+    "url": "https://github.com/spring-projects/spring-petclinic",
+    "stack": "spring"
+  },
+  {
+    "name": "jhipster-sample-app",
+    "url": "https://github.com/jhipster/jhipster-sample-app",
+    "stack": "spring",
+    "note": "Spring Boot + Angular"
+  },
+  {
+    "name": "cal.com",
+    "url": "https://github.com/calcom/cal.com",
+    "stack": "nextjs",
+    "note": "very large turborepo, many @calcom/* packages"
+  },
+  {
+    "name": "dub",
+    "url": "https://github.com/dubinc/dub",
+    "stack": "nextjs",
+    "note": "Next.js monorepo with many SaaS integrations"
+  },
+  {
+    "name": "saleor",
+    "url": "https://github.com/saleor/saleor",
+    "stack": "django",
+    "note": "large Django + GraphQL"
+  },
+  {
+    "name": "healthchecks",
+    "url": "https://github.com/healthchecks/healthchecks",
+    "stack": "django",
+    "note": "classic small Django app"
+  },
+  {
+    "name": "mall",
+    "url": "https://github.com/macrozheng/mall",
+    "stack": "spring",
+    "note": "multi-module Maven, MyBatis, Redis, Mongo, RabbitMQ, ES, OSS"
+  },
+  {
+    "name": "spring-boot-realworld",
+    "url": "https://github.com/gothinkster/spring-boot-realworld-example-app",
+    "stack": "spring",
+    "note": "Gradle + MyBatis"
+  },
+  {
+    "name": "tut-spring-boot-kotlin",
+    "url": "https://github.com/spring-guides/tut-spring-boot-kotlin",
+    "stack": "spring",
+    "note": "Kotlin-first Spring"
+  }
+]

@@ -1,0 +1,27 @@
+{
+  "name": "houserules-monorepo",
+  "private": true,
+  "description": "Learn a repo's house rules, then teach them to humans and coding agents.",
+  "license": "MIT",
+  "type": "module",
+  "workspaces": [
+    "packages/core",
+    "packages/mcp",
+    "packages/skills",
+    "packages/cli"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "tsc -b --clean",
+    "test": "npm run build && node --test $(find packages -path '*/dist/*' -name '*.test.js' -not -path '*/node_modules/*')",
+    "houserules": "node packages/cli/dist/index.js",
+    "eval": "npm run build && node evals/audit.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.0",
+    "typescript": "^7.0.2"
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "name": "@houserules/skills",
+  "version": "0.0.1",
+  "description": "Agent skills (SKILL.md) for Claude Code and Codex that drive houserules.",
+  "license": "MIT",
+  "type": "module",
+  "files": ["houserules"]
+}
