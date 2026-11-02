@@ -80,8 +80,14 @@ function inlineNode(graph: CallGraph, route: Route): GraphNode | undefined {
   return graph.nodes.get(id);
 }
 
+const TEST_FILE = /(^|\/)(tests?|__tests__|spec|specs|e2e|fixtures?)\/|\.(test|spec|e2e|integration)\.[cm]?[jt]sx?$|(^|\/)test_[^/]+\.py$|_test\.(py|go)$/i;
+
 function handlerNode(graph: CallGraph, symbols: SymbolIndex, route: Route): GraphNode | undefined {
   const all = [...graph.nodes.values()];
+  if (route.pinned && route.handlerFile) {
+    const pinned = graph.find(route.handlerFile, route.handler) ?? all.find((n) => n.file === route.handlerFile && (n.name === route.handler || n.name.endsWith(`.${route.handler.split(".").pop()}`)));
+    if (pinned) return pinned;
+  }
   const inFile = all.filter((n) => n.file === route.file);
   const exact = inFile.find((n) => n.name === route.handler) ?? inFile.find((n) => n.name.endsWith(`.${route.handler.split(".").pop()}`) && route.handler.includes(".") === n.name.includes("."));
   if (exact) return exact;
@@ -96,15 +102,30 @@ function handlerNode(graph: CallGraph, symbols: SymbolIndex, route: Route): Grap
   // the object (auth.controller.js), or the only function called `login` in the repo.
   const [obj, fn] = route.handler.includes(".") ? (route.handler.split(".").slice(-2) as [string, string]) : [undefined, undefined];
   if (obj && fn) {
+    // The object's own file, when the route file says where it comes from (imported, or built by a factory).
+    if (route.handlerFile || route.factory) {
+      const real = all.filter((n) => !n.external && n.file && !TEST_FILE.test(n.file));
+      // The factory or class itself; through a barrel (`from "../controllers"` → index.ts) it lives in another file.
+      const makers = route.factory ? real.filter((n) => n.name === route.factory) : [];
+      const homes = [...new Set([route.handlerFile, ...makers.map((n) => n.file)].filter((f): f is string => Boolean(f)))];
+      for (const home of homes) {
+        const own = real.find((n) => n.file === home && (n.name === fn || n.name === `${route.factory}.${fn}` || (!route.factory && n.name.endsWith(`.${fn}`))));
+        if (own) return own;
+      }
+      // A handler written in a way that has no node of its own: start from the factory, which holds its code.
+      const maker = makers.find((n) => homes.includes(n.file!)) ?? makers[0];
+      if (maker) return maker;
+    }
     const key = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
-    const named = all.filter((n) => n.name === fn && !n.external && n.file);
+    // Tests often define helpers with the same names (`route`, `list`); they never handle a real request.
+    const named = all.filter((n) => n.name === fn && !n.external && n.file && !TEST_FILE.test(n.file));
     const byFile = named.find((n) => key(path.posix.basename(n.file!).replace(/\.[^.]+$/, "")) === key(obj));
     if (byFile) return byFile;
     if (named.length === 1) return named[0];
   }
   // Django: urls.py names a view defined elsewhere; prefer one in the same app.
   const dir = path.posix.dirname(route.file);
-  const hits = symbols.find(route.handler.split(".")[0]!).sort((a, b) => Number(path.posix.dirname(b.file) === dir) - Number(path.posix.dirname(a.file) === dir));
+  const hits = symbols.find(route.handler.split(".")[0]!).filter((h) => !TEST_FILE.test(h.file)).sort((a, b) => Number(path.posix.dirname(b.file) === dir) - Number(path.posix.dirname(a.file) === dir));
   const hit = hits[0];
   if (!hit) return undefined;
   return graph.find(hit.file, hit.symbol.name) ?? [...graph.nodes.values()].find((n) => n.file === hit.file && n.name.split(".").pop() === hit.symbol.name);

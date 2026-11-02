@@ -41,6 +41,8 @@ const TS_QUERY = `
 (method_definition name: (property_identifier) @name) @method
 (lexical_declaration (variable_declarator name: (identifier) @name value: [(arrow_function) (function_expression)])) @function
 (lexical_declaration (variable_declarator name: (identifier) @name)) @variable
+(pair key: (property_identifier) @name value: [(arrow_function) (function_expression)]) @method
+(public_field_definition name: (property_identifier) @name value: [(arrow_function) (function_expression)]) @method
 `;
 
 const JS_QUERY = `
@@ -50,6 +52,8 @@ const JS_QUERY = `
 (method_definition name: (property_identifier) @name) @method
 (lexical_declaration (variable_declarator name: (identifier) @name value: [(arrow_function) (function_expression)])) @function
 (lexical_declaration (variable_declarator name: (identifier) @name)) @variable
+(pair key: (property_identifier) @name value: [(arrow_function) (function_expression)]) @method
+(field_definition property: (property_identifier) @name value: [(arrow_function) (function_expression)]) @method
 `;
 
 const PY_QUERY = `
@@ -140,6 +144,7 @@ export async function extractSymbols(rel: string, text: string): Promise<SymbolD
       const kind = def.name as SymbolKind;
       const node = def.node;
       if (kind === "variable" && !isTopLevel(node)) continue;
+      if (/^(pair|public_field_definition|field_definition)$/.test(node.type) && !isRequestHandler(node)) continue;
 
       const container = enclosingClass(node);
       const sym: SymbolDef = {
@@ -158,6 +163,18 @@ export async function extractSymbols(rel: string, text: string): Promise<SymbolD
   } finally {
     tree.delete();
   }
+}
+
+/**
+ * `route: async (req, res) => …` in a returned object, or `route = async (req, res) => …` as a class field: a
+ * request handler written as an arrow function. Only these become symbols; other object callbacks
+ * (`{ onError: () => … }`) stay part of the function around them, so its calls aren't split off.
+ */
+function isRequestHandler(node: TSNode): boolean {
+  const fn = node.childForFieldName("value");
+  const params = fn?.childForFieldName("parameters") ?? fn?.childForFieldName("parameter");
+  const first = (params?.type === "identifier" ? params : params?.namedChildren[0])?.text ?? "";
+  return /^(_?req|request|ctx|context|c)\b/.test(first.replace(/^\{.*$/s, ""));
 }
 
 function isTopLevel(node: TSNode): boolean {

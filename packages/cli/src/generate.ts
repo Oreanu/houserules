@@ -200,10 +200,10 @@ async function buildPrompt(only: Only, done: { sections: string[]; tracks: strin
   const skill = await readFile(path.join(path.dirname(require.resolve("@houserules/skills/package.json")), "houserules", "SKILL.md"), "utf8");
   const scope =
     only === "docs"
-      ? "Do workflow steps 1-6: fill every architecture and guidelines section, name the entry points and turn guidelines into checkable rules. Skip the lessons."
+      ? "Do workflow steps 1-6: fill every architecture and guidelines section, name the entry points (and give the real handler for any that trace to 0 steps) and turn guidelines into checkable rules. Skip the lessons."
       : only === "lessons"
         ? "Write the lessons only (workflow step 7, after orienting with steps 1-2): all three tracks."
-        : "Do workflow steps 1-7: fill every architecture and guidelines section, name the entry points, turn guidelines into checkable rules, then write lessons for all three tracks.";
+        : "Do workflow steps 1-7: fill every architecture and guidelines section, name the entry points (and give the real handler for any that trace to 0 steps), turn guidelines into checkable rules, then write lessons for all three tracks.";
   return [
     "You are running non-interactively from `houserules generate`. Nobody can answer questions, so make reasonable calls and keep going until the work is done.",
     `Work on the repository in the current directory, following the houserules skill below. ${scope}`,

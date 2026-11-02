@@ -5,7 +5,7 @@ import { canExtract, extractSymbols, type SymbolDef } from "./extract.js";
 
 export { extractSymbols, type SymbolDef, type SymbolKind } from "./extract.js";
 
-const CACHE_VERSION = 1;
+const CACHE_VERSION = 2; // 2: request handlers written as arrow-function properties and class fields
 
 interface CacheFile {
   version: number;

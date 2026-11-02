@@ -14,7 +14,9 @@ export interface Route {
   file: string;
   line: number;
   handler: string; // the function or class that handles it
-  handlerFile?: string; // where the handler is defined, when it's not in `file` (Laravel controllers)
+  handlerFile?: string; // where the handler is defined, when it's not in `file` (Laravel controllers, imported or factory-built JS controllers)
+  factory?: string; // the function that builds the handler's object (`const controller = createDeviceController(deps)`)
+  pinned?: boolean; // the handler was named by the agent (describe_entry_points) and checked to exist
   inline?: [number, number]; // lines of an inline handler (Express/Laravel closures), when it has no name
   middleware?: string[]; // what runs before the handler, as written ("auth:sanctum", "can:update,order")
   name?: string; // the framework's route name ("bookings.cancel"), when it has one
@@ -116,6 +118,18 @@ export async function listRoutes(rootDir: string, analysis: Analysis): Promise<R
   }
 
   const order: RouteKind[] = ["page", "screen", "api", "action", "webhook", "job", "middleware"];
+  // Handlers an agent found by reading the code, for routes written in a way the rules above don't follow.
+  // Checked to exist when submitted; one that has since moved is ignored rather than trusted.
+  try {
+    const pins = (JSON.parse(await readFile(path.join(root, ".houserules", "entrypoints.json"), "utf8")) as { handlers?: Record<string, { file: string; symbol: string }> }).handlers ?? {};
+    const known = new Set(analysis.files.map((f) => f.path));
+    for (const r of out) {
+      const pin = pins[r.id];
+      if (pin && known.has(pin.file)) Object.assign(r, { handler: pin.symbol, handlerFile: pin.file, pinned: true, factory: undefined, inline: undefined });
+    }
+  } catch {
+    // none yet
+  }
   return out.sort((a, b) => order.indexOf(a.kind) - order.indexOf(b.kind) || a.path.localeCompare(b.path));
 }
 
@@ -523,7 +537,7 @@ async function nodeRoutes(files: string[], read: Read, lineOf: LineOf, push: Pus
   };
   const resolveIdent = (file: string, text: string, ident: string): string | null => {
     const spec =
-      text.match(new RegExp(`import\\s+(?:\\{[^}]*\\b${ident}\\b[^}]*\\}|${ident}|\\*\\s+as\\s+${ident})\\s*(?:,\\s*\\{[^}]*\\})?\\s+from\\s+['"]([^'"]+)['"]`))?.[1] ??
+      text.match(new RegExp(`import\\s+(?:type\\s+)?(?:\\{[^}]*\\b${ident}\\b[^}]*\\}|${ident}|\\*\\s+as\\s+${ident})\\s*(?:,\\s*\\{[^}]*\\})?\\s+from\\s+['"]([^'"]+)['"]`))?.[1] ??
       text.match(new RegExp(`(?:const|let|var)\\s+(?:\\{[^}]*\\b${ident}\\b[^}]*\\}|${ident})\\s*=\\s*require\\(\\s*['"]([^'"]+)['"]`))?.[1];
     return spec ? (analysis.imports.find((e) => e.from === file && e.specifier === spec)?.resolved ?? null) : null;
   };
@@ -574,7 +588,10 @@ async function nodeRoutes(files: string[], read: Read, lineOf: LineOf, push: Pus
       const url = joinUrl(prefix.get(p) ?? "", m[4]!).replace(/\{(\w+)\}/g, ":$1");
       const base = { kind: (WEBHOOK.test(url) ? "webhook" : "api") as RouteKind, path: url, methods: [m[2]!.toUpperCase().replace("ALL", "ANY")], file: p, line: lineOf(text, m.index!), ...(wrappers.length ? { middleware: wrappers } : {}) };
       if (isInlineFn(last.text)) push({ ...base, handler: "inline handler", inline: [lineOf(text, last.start), lineOf(text, last.start + last.text.length)] });
-      else push({ ...base, handler: handlerLabel(last.text) });
+      else {
+        const handler = handlerLabel(last.text);
+        push({ ...base, handler, ...handlerSource(p, text, handler, resolveIdent) });
+      }
     }
     // fastify.route({ method: 'GET', url: '/x', handler })
     for (const m of text.matchAll(/\b(\w+)\.route\s*\(\s*\{/g)) {
@@ -621,6 +638,31 @@ function unwrapHandler(arg: { text: string; start: number }): { handler: { text:
     cur = { text: fn.text.trim(), start: cur.start + fn.start };
   }
   return { handler: cur, wrappers };
+}
+
+/**
+ * Where `obj.fn`'s object comes from: imported (`import { controller } from "./controller"`) or built by a factory
+ * (`const controller = createDeviceController(deps)`, `new DeviceController(deps)`), so the trace can look in that file.
+ */
+function handlerSource(file: string, text: string, handler: string, resolve: (file: string, text: string, ident: string) => string | null): { handlerFile?: string; factory?: string } {
+  const obj = handler.match(/^([A-Za-z_$][\w$]*)\.[\w$]+$/)?.[1];
+  if (!obj) return {};
+  const made = text.match(new RegExp(`(?:const|let|var)\\s+${obj}\\b\\s*(?::[^=\\n]+)?=\\s*(?:await\\s+)?(?:new\\s+)?([A-Za-z_$][\\w$]*)(?:\\.([\\w$]+))?\\s*\\(`));
+  if (made) {
+    const [, ident, member] = made;
+    const from = resolve(file, text, ident!) ?? undefined;
+    const factory = member ?? ident!;
+    return { ...(from && from !== file ? { handlerFile: from } : {}), factory };
+  }
+  // Passed in, typed: deviceRoutes(controller: DeviceController) or controller: ReturnType<typeof createDeviceController>.
+  const typed = text.match(new RegExp(`\\b${obj}\\s*\\??:\\s*(?:ReturnType<\\s*typeof\\s+([A-Za-z_$][\\w$]*)\\s*>|([A-Z][\\w$]*))`));
+  if (typed) {
+    const ident = (typed[1] ?? typed[2])!;
+    const from = resolve(file, text, ident);
+    return { ...(from && from !== file ? { handlerFile: from } : {}), factory: ident };
+  }
+  const from = resolve(file, text, obj);
+  return from && from !== file ? { handlerFile: from } : {};
 }
 
 /** A guard as written, with its plain arguments: auth("manageUsers") → "auth:manageUsers", validate(schema) → "validate". */

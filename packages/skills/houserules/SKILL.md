@@ -22,7 +22,7 @@ lines and names exist; it can't prove your claim is right, so only write what th
 | `get_doc_spec` | See the docs, their sections, limits and what's already filled. |
 | `submit_section` | Submit one section's items. Each item's evidence is checked; rejected items come back with reasons. |
 | `list_entry_points` / `trace_entry_point` | Every way into the app, and what runs when one is hit, function by function. Start your reading here. |
-| `describe_entry_points` | Friendly area names, their order along the customer journey, and fixes for entry-point titles that read badly. |
+| `describe_entry_points` | Friendly area names, their order along the customer journey, fixes for entry-point titles that read badly, and the real handler for entry points houserules couldn't follow. |
 | `official_docs` | Read the latest official docs for the stack (by API name or URL). Lessons quote these, never memory. |
 | `get_lesson_plan` | Installed vs latest versions, and the framework APIs the entry points touch, with their official pages. |
 | `submit_lessons` | Submit one learning track. Docs quotes are checked against the official page; code and answers against the repo. |
@@ -66,6 +66,11 @@ If the MCP server isn't connected, tell the user to run `houserules init` (from 
    customer journey (sign up → … → delivery; leave back-office areas unordered), and titles for entry points whose
    generated title reads badly ("Collect order confirm payment" → "Pay for an order"). Names only; don't describe
    behaviour the code doesn't show.
+   Then look at every entry point with `steps: 0`: houserules couldn't follow its handler (a wrapper, a factory,
+   dependency injection, a decorator…). Read the route and the code it registers, find the function that really
+   handles the request, and pass it in the same call as `handlers: [{ id, file, symbol }]` (`symbol` is a function
+   name or `Class.method`). houserules rejects names that don't exist; fix and resend those. Group routes that share
+   a pattern and do them all, not just a sample.
 6. **Turn guidelines into checks.** For each pattern, convention or pitfall that a regex can catch honestly,
    call `submit_rules` (one call, all rules): the rule as a sentence, `files` globs, `except` globs (tests,
    the one place allowed to do it), a `forbid` or `require` pattern, the `fix`, and `guideline` pointing at the

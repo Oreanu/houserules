@@ -1,5 +1,6 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import type { SymbolIndex } from "../symbols/index.js";
 import type { Analysis, Integration } from "../types.js";
 import type { Route } from "./routes.js";
 import type { Trace, TraceStep } from "./trace.js";
@@ -60,6 +61,7 @@ export interface EntryMap {
 export interface EntryOverrides {
   areas?: Record<string, { title?: string; blurb?: string; order?: number }>;
   titles?: Record<string, string>; // route id -> title
+  handlers?: Record<string, { file: string; symbol: string }>; // route id -> the function that really handles it
 }
 
 export function buildEntryMap(routes: Route[], traces: Map<string, Trace>, analysis: Analysis, overrides: EntryOverrides = {}): EntryMap {
@@ -517,13 +519,14 @@ export async function readEntryOverrides(rootDir: string): Promise<EntryOverride
 export interface EntryOverridesInput {
   areas?: { id: string; title?: string; blurb?: string; order?: number }[];
   titles?: { id: string; title: string }[];
+  handlers?: { id: string; file: string; symbol: string }[];
 }
 
 /**
  * Stores friendlier area names, the customer-journey order and route titles. Only names and order: who calls
  * what, and what it does, always come from the code. Unknown ids are rejected so a typo can't hide an area.
  */
-export async function submitEntryOverrides(rootDir: string, routes: Route[], input: EntryOverridesInput): Promise<{ accepted: number; rejected: { id: string; problem: string }[] }> {
+export async function submitEntryOverrides(rootDir: string, routes: Route[], input: EntryOverridesInput, symbols?: SymbolIndex): Promise<{ accepted: number; rejected: { id: string; problem: string }[] }> {
   const root = path.resolve(rootDir);
   const current = await readEntryOverrides(root);
   const areaIds = new Set(routes.map(areaOf));
@@ -544,6 +547,20 @@ export async function submitEntryOverrides(rootDir: string, routes: Route[], inp
     else if (!t.title.trim() || t.title.length > 70) rejected.push({ id: t.id, problem: "Title must be 1-70 characters" });
     else {
       (current.titles ??= {})[t.id] = t.title.trim();
+      accepted++;
+    }
+  }
+  // The real handler of a route houserules couldn't follow. It must exist: the file, and a function or method by
+  // that name in it ("route", "TripController.list"), so a guess can't send the trace somewhere made up.
+  for (const h of input.handlers ?? []) {
+    const defs = symbols?.byFile.get(h.file);
+    const name = h.symbol.trim();
+    const found = defs?.find((d) => d.name === name || `${d.container}.${d.name}` === name);
+    if (!routeIds.has(h.id)) rejected.push({ id: h.id, problem: "No entry point with this id (use list_entry_points)" });
+    else if (!defs) rejected.push({ id: h.id, problem: `No file ${h.file} with code houserules can read (paths are relative to the repo root)` });
+    else if (!found) rejected.push({ id: h.id, problem: `No function or method "${name}" in ${h.file}. Names there: ${defs.filter((d) => d.kind === "function" || d.kind === "method").map((d) => (d.container ? `${d.container}.${d.name}` : d.name)).slice(0, 30).join(", ")}` });
+    else {
+      (current.handlers ??= {})[h.id] = { file: h.file, symbol: name };
       accepted++;
     }
   }

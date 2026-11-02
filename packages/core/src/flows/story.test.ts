@@ -176,3 +176,80 @@ test("Express: a handler passed through a wrapper is traced, and the wrapper is 
   const t = traceRoute(await buildCallGraph(root, a, sym), sym, at("/:id/route"));
   assert.ok(t.steps.some((s) => /loadRoute/.test(s.name)), `the trace goes through the wrapper into the controller and its service: ${t.steps.map((s) => s.name).join(", ")}`);
 });
+
+test("Express: a controller built by a factory (or passed in typed) is traced, and tests with the same method names are ignored", async () => {
+  const controller = `import { loadRoute } from "./service";\nexport function createDeviceController(deps: { repo: unknown }) {\n  async function route(req: any, res: any) {\n    res.json(loadRoute(req.params.id));\n  }\n  return {\n    route,\n    show: async (req: any, res: any) => {\n      res.json(loadRoute(req.params.id));\n    },\n  };\n}\n`;
+  const root = await makeTree({
+    "package.json": JSON.stringify({ dependencies: { express: "^4" } }),
+    "src/guard.ts": `export function guarded(a: string, b: string, c: string, fn: Function) {\n  return fn;\n}\n`,
+    "src/devices/service.ts": `export function loadRoute(id: string) {\n  return [id];\n}\n`,
+    "src/devices/deviceController.factory.ts": controller,
+    "src/devices/routes.ts": `import { Router } from "express";\nimport { guarded } from "../guard";\nimport { createDeviceController } from "./deviceController.factory";\nexport function deviceRoutes(deps: { repo: unknown }) {\n  const router = Router();\n  const controller = createDeviceController(deps);\n  router.get("/:id/route", guarded("web", "read", "RouteHistory", controller.route));\n  router.get("/:id", guarded("web", "read", "Device", controller.show));\n  return router;\n}\n`,
+    "src/trips/routes.ts": `import { Router } from "express";\nimport type { createDeviceController } from "../devices/deviceController.factory";\nexport function tripRoutes(ctl: ReturnType<typeof createDeviceController>) {\n  const router = Router();\n  router.get("/trips/:id/route", ctl.route);\n  return router;\n}\n`,
+    "test/route.integration.test.ts": `export async function route() {\n  return 1;\n}\n`,
+  });
+  const a = await scan(root);
+  const routes = await listRoutes(root, a);
+  const sym = await buildSymbolIndex(root, a);
+  const g = await buildCallGraph(root, a, sym);
+  for (const p of ["/:id/route", "/:id", "/trips/:id/route"]) {
+    const route = routes.find((x) => x.path === p)!;
+    assert.equal(route.handlerFile, "src/devices/deviceController.factory.ts", p);
+    const names = traceRoute(g, sym, route).steps.map((s) => `${s.name}@${s.file}`);
+    assert.ok(names.some((n) => n.startsWith("loadRoute@")), `${p}: ${names.join(" > ")}`);
+    assert.ok(!names.some((n) => n.includes("test/")), `${p} never starts in a test: ${names.join(" > ")}`);
+  }
+});
+
+test("a route houserules can't follow gets its real handler from the agent, checked to exist", async () => {
+  const root = await makeTree({
+    "package.json": JSON.stringify({ dependencies: { express: "^4" } }),
+    "src/container.ts": `const registry = new Map<string, Function>();\nexport const container = { get: (name: string) => registry.get(name)! };\n`,
+    "src/reports/service.ts": `export function buildReport(id: string) {\n  return [id];\n}\n`,
+    "src/reports/handlers.ts": `import { buildReport } from "./service";\nexport class ReportHandlers {\n  download(req: any, res: any) {\n    res.json(buildReport(req.params.id));\n  }\n}\n`,
+    "src/reports/routes.ts": `import { Router } from "express";\nimport { container } from "../container";\nexport const router = Router();\nrouter.get("/reports/:id", container.get("reports.download"));\n`,
+  });
+  const a = await scan(root);
+  const sym = await buildSymbolIndex(root, a);
+  const before = (await listRoutes(root, a)).find((x) => x.path === "/reports/:id")!;
+  assert.ok(traceRoute(await buildCallGraph(root, a, sym), sym, before).steps.length <= 1, "houserules can't follow a container lookup by itself");
+
+  const res = await submitEntryOverrides(root, [before], {
+    handlers: [
+      { id: before.id, file: "src/reports/handlers.ts", symbol: "ReportHandlers.downlod" },
+      { id: before.id, file: "src/reports/nope.ts", symbol: "download" },
+      { id: before.id, file: "src/reports/handlers.ts", symbol: "ReportHandlers.download" },
+    ],
+  }, sym);
+  assert.equal(res.accepted, 1);
+  assert.match(res.rejected[0]!.problem, /No function or method "ReportHandlers.downlod".*ReportHandlers\.download/);
+  assert.match(res.rejected[1]!.problem, /No file src\/reports\/nope\.ts/);
+
+  const after = (await listRoutes(root, a)).find((x) => x.path === "/reports/:id")!;
+  assert.equal(after.id, before.id, "the id stays the same, so titles and pins keep working");
+  const names = traceRoute(await buildCallGraph(root, a, sym), sym, after).steps.map((s) => s.name);
+  assert.deepEqual(names.slice(0, 2), ["ReportHandlers.download", "buildReport"]);
+});
+
+test("Express: arrow-function handlers in factories and class fields, imported through a barrel, trace to the service", async () => {
+  const root = await makeTree({
+    "package.json": "{\"dependencies\":{\"express\":\"^4\"}}\n",
+    "src/controllers/index.ts": "export * from \"./telematics.controller\";\nexport { TripController } from \"./trip.controller\";\n",
+    "src/controllers/telematics.controller.ts": "import { VehicleService } from \"../services/vehicle.service\";\ntype Deps = { vehicles: VehicleService };\nexport const createTelematicsController = ({ vehicles }: Deps) => ({\n  route: async (req: any, res: any) => {\n    res.json(await vehicles.history(req.params.id));\n  },\n  latest: async (req: any, res: any) => {\n    res.json(await vehicles.history(\"latest\"));\n  },\n});\n",
+    "src/controllers/trip.controller.ts": "import { VehicleService } from \"../services/vehicle.service\";\nexport class TripController {\n  constructor(private readonly vehicles: VehicleService) {}\n  route = async (req: any, res: any) => {\n    res.json(await this.vehicles.history(req.params.id));\n  };\n  async list(req: any, res: any) {\n    res.json(await this.vehicles.history(\"all\"));\n  }\n}\n",
+    "src/lib/db.ts": "export const db = { query(sql: string, args: unknown[]) { return [sql, args]; } };\n",
+    "src/lib/guard.ts": "export const guarded = (a: string, b: string, c: string, fn: Function) => fn;\nexport const asyncHandler = (fn: Function) => fn;\n",
+    "src/routes/telematics.routes.ts": "import { Router } from \"express\";\nimport { guarded, asyncHandler } from \"../lib/guard\";\nimport { createTelematicsController, TripController } from \"../controllers\";\nimport { makeVehicleService } from \"../services/vehicle.service\";\n\nexport function telematicsRoutes() {\n  const router = Router();\n  const vehicles = makeVehicleService();\n  const controller = createTelematicsController({ vehicles });\n  const trips = new TripController(vehicles);\n  router.get(\"/:id/route\", guarded(\"web\", \"read\", \"RouteHistory\", controller.route));\n  router.get(\"/:id/latest\", asyncHandler(controller.latest));\n  router.get(\"/trips/:id/route\", guarded(\"web\", \"read\", \"Trip\", trips.route));\n  router.get(\"/trips\", guarded(\"web\", \"read\", \"Trip\", trips.list.bind(trips)));\n  return router;\n}\n",
+    "src/services/vehicle.service.ts": "import { db } from \"../lib/db\";\nexport class VehicleService {\n  async history(id: string) {\n    return db.query(\"select\", [id]);\n  }\n}\nexport function makeVehicleService() {\n  return new VehicleService();\n}\n",
+    "test/helpers.test.ts": "export const route = async () => 1;\nexport function latest() { return 2; }\nexport function list() { return 3; }\n",
+  });
+  const a = await scan(root);
+  const sym = await buildSymbolIndex(root, a);
+  const g = await buildCallGraph(root, a, sym);
+  const want: Record<string, string> = { "/:id/route": "route", "/:id/latest": "latest", "/trips/:id/route": "TripController.route", "/trips": "TripController.list" };
+  for (const r of await listRoutes(root, a)) {
+    const names = traceRoute(g, sym, r).steps.map((s) => s.name);
+    assert.equal(names[0], want[r.path], `${r.path}: ${names.join(" > ")}`);
+    assert.ok(names.includes("VehicleService.history"), `${r.path} reaches the service: ${names.join(" > ")}`);
+  }
+});

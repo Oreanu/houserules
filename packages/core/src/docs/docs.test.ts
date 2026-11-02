@@ -122,6 +122,16 @@ test("render writes docs and a managed AGENTS.md block without touching the user
   const again = await readFile(path.join(root, "AGENTS.md"), "utf8");
   assert.equal(again.split("houserules:begin").length, 2);
   assert.match(await readFile(path.join(root, "CLAUDE.md"), "utf8"), /@AGENTS\.md/);
+
+  // A later render with nothing new leaves the files alone, even on another day.
+  const before = await readFile(path.join(root, "docs/houserules/GUIDELINES.md"), "utf8");
+  await renderDocs(root, await readStore(root), new Date("2026-12-25T00:00:00Z"));
+  assert.equal(await readFile(path.join(root, "docs/houserules/GUIDELINES.md"), "utf8"), before);
+
+  // A team that takes the import out of its own CLAUDE.md keeps it out.
+  await writeFile(path.join(root, "CLAUDE.md"), "# Our Claude notes\n");
+  await renderDocs(root, await readStore(root));
+  assert.equal(await readFile(path.join(root, "CLAUDE.md"), "utf8"), "# Our Claude notes\n");
 });
 
 test("recheck reports broken evidence and changed files after the code moves", async () => {

@@ -33,7 +33,7 @@ export interface CallGraph {
   find(file: string, name: string): GraphNode | undefined;
 }
 
-const CACHE_VERSION = 6; // 2: CommonJS require bindings; 3: branch conditions on edges; 4: typed PHP receivers
+const CACHE_VERSION = 7; // 7: handler-shaped arrow properties are nodes; 2: CommonJS require bindings; 3: branch conditions on edges; 4: typed PHP receivers
 const CALLABLE = new Set(["function", "method", "class"]);
 // Names too common to resolve by name alone: they would link unrelated code.
 const GENERIC = new Set(["get", "set", "add", "map", "find", "filter", "update", "save", "delete", "create", "run", "init", "handle", "render", "toString", "push", "call", "apply", "then", "catch"]);

@@ -248,14 +248,19 @@ export function createServer(defaultRoot = process.cwd()): McpServer {
     {
       title: "List entry points",
       description:
-        "Every way into the app: pages, API endpoints, server actions, webhooks, jobs and middleware, with the file, handler and middleware for each, plus the area it belongs to, who calls it (audience) and its current plain-English title.",
+        "Every way into the app: pages, API endpoints, server actions, webhooks, jobs and middleware, with the file, handler and middleware for each, plus the area it belongs to, who calls it (audience), its current plain-English title, and `steps`: how many functions houserules could trace from it. steps 0 means houserules couldn't follow the handler; find the real one and give it to describe_entry_points.",
       inputSchema: { root: rootArg },
     },
     async ({ root }) => {
       const dir = path.resolve(defaultRoot, root ?? ".");
-      const routes = await listRoutes(dir, await load(root));
+      const analysis = await load(root);
+      const routes = await listRoutes(dir, analysis);
       const o = await readEntryOverrides(dir);
-      return json(routes.map((r) => ({ ...r, area: areaOf(r), audience: audienceOf(r), title: o.titles?.[r.id] ?? routeTitle(r) })));
+      const symbols = await buildSymbolIndex(dir, analysis);
+      const graph = await buildCallGraph(dir, analysis, symbols);
+      // Steps below the handler itself: what a reader would actually see.
+      const depth = (r: (typeof routes)[number]) => Math.max(0, traceRoute(graph, symbols, r).steps.length - 1);
+      return json(routes.map((r) => ({ ...r, area: areaOf(r), audience: audienceOf(r), title: o.titles?.[r.id] ?? routeTitle(r), steps: depth(r) })));
     },
   );
 
@@ -264,16 +269,18 @@ export function createServer(defaultRoot = process.cwd()): McpServer {
     {
       title: "Describe entry points",
       description:
-        "Names for the Entry points page: a friendly title and one-line blurb per area (area ids from list_entry_points), their order along the customer journey (1 = where a new user starts), and better titles for entry points whose generated title reads badly. Names and order only; what each one does always comes from the code. Merges with earlier calls.",
+        "Names for the Entry points page: a friendly title and one-line blurb per area (area ids from list_entry_points), their order along the customer journey (1 = where a new user starts), and better titles for entry points whose generated title reads badly. Also `handlers`: for an entry point list_entry_points shows with steps 0, the function that really handles it, found by reading the route (`file` relative to the repo root, `symbol` as a function name or Class.method). houserules checks it exists and traces from it. Names, order and handlers only; what each one does always comes from the code. Merges with earlier calls.",
       inputSchema: {
         areas: z.array(z.object({ id: z.string(), title: z.string().optional(), blurb: z.string().optional(), order: z.number().int().optional() })).optional(),
         titles: z.array(z.object({ id: z.string(), title: z.string() })).optional(),
+        handlers: z.array(z.object({ id: z.string(), file: z.string(), symbol: z.string() })).optional(),
         root: rootArg,
       },
     },
-    async ({ areas, titles, root }) => {
+    async ({ areas, titles, handlers, root }) => {
       const dir = path.resolve(defaultRoot, root ?? ".");
-      return json(await submitEntryOverrides(dir, await listRoutes(dir, await load(root)), { ...(areas ? { areas } : {}), ...(titles ? { titles } : {}) }));
+      const analysis = await load(root);
+      return json(await submitEntryOverrides(dir, await listRoutes(dir, analysis), { ...(areas ? { areas } : {}), ...(titles ? { titles } : {}), ...(handlers ? { handlers } : {}) }, await buildSymbolIndex(dir, analysis)));
     },
   );
 
