@@ -13,17 +13,32 @@ houserules scans a repository (stack, entry points, dependencies, imports, third
 env vars, tests, CI) and gives Claude Code and Codex the tools and playbook to explain how the repo
 already works, so people and agents reuse what exists and follow established patterns.
 
-> Status: **M1**. Scan, agent setup, verified doc generation (architecture, guidelines, AGENTS.md) and a
-> local preview work. Drift against official docs, reuse maps and learning paths are next. See [PLAN.md](../PLAN.md).
+> Status: early. Scanning, entry-point stories, verified docs (architecture, guidelines, AGENTS.md), lessons,
+> saved answers, house rules and pull-request checks all work; expect rough edges on stacks we haven't tried yet.
+
+## Install
+
+houserules isn't on npm yet, so run it from source (Node 20+):
+
+```bash
+git clone https://github.com/Oreanu/houserules.git
+cd houserules && npm install && npm run build
+alias houserules="node $(pwd)/packages/cli/dist/index.js"
+```
+
+Add the `alias` line to your shell profile to keep it. Once it's published, `npx houserules` will do the same.
 
 ## Quick start
 
+In the repository you want documented:
+
 ```bash
-npx houserules generate  # scan, then write the docs and lessons with your Claude Code or Codex
+houserules generate      # scan, then write the docs and lessons with your Claude Code or Codex
+houserules preview       # open them in your browser
 ```
 
 `generate` runs your own signed-in agent headless. It can read the repo and call the houserules tools,
-nothing else: no edits, no shell. Prefer to drive it yourself? `npx houserules init` installs the skill and
+nothing else: no edits, no shell. Prefer to drive it yourself? `houserules init` installs the skill and
 MCP server, then ask Claude Code or Codex inside the repo to *"run houserules"*.
 
 The agent reads the code, fills each doc section through the MCP tools, and every claim is checked
@@ -32,18 +47,18 @@ kept. Then it renders `docs/houserules/ARCHITECTURE.md`, `docs/houserules/GUIDEL
 block in `AGENTS.md` (imported from `CLAUDE.md`). Your own text in those files is left alone.
 
 ```bash
-npx houserules preview      # browse the docs with clickable evidence, live verification and the scan results
-npx houserules verify       # re-check the docs against the current code; exits 1 if anything broke
-npx houserules render       # re-render the markdown from .houserules/docs.json
+houserules preview      # browse the docs with clickable evidence, live verification and the scan results
+houserules verify       # re-check the docs against the current code; exits 1 if anything broke
+houserules render       # re-render the markdown from .houserules/docs.json
 ```
 
 Other commands:
 
 ```bash
-npx houserules scan [path] [--json] [--out file]
-npx houserules init --dry-run          # preview changes
-npx houserules init --agent codex      # or claude, all
-npx houserules init --scope user       # install into your home directory instead of the repo
+houserules scan [path] [--json] [--out file]
+houserules init --dry-run          # preview changes
+houserules init --agent codex      # or claude, all
+houserules init --scope user       # install into your home directory instead of the repo
 ```
 
 ## What `init` changes

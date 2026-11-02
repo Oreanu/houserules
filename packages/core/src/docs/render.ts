@@ -167,7 +167,7 @@ export function renderAgents(store: DocStore, rules: { title: string; fix?: stri
     out.push("");
   }
   if (rules.length) {
-    out.push("### Checked rules", "", "These are enforced on every pull request. Check your changes with the houserules `check_rules` tool (or `npx houserules ci`) before you finish.", "");
+    out.push("### Checked rules", "", "These are enforced on every pull request. Check your changes with the houserules `check_rules` tool (or `houserules ci`) before you finish.", "");
     for (const r of rules) out.push(`- ${r.title}${r.fix ? `: ${r.fix}` : ""} (in \`${r.files.join("`, `")}\`${r.except?.length ? `, not \`${r.except.join("`, `")}\`` : ""})`);
     out.push("");
   }

@@ -109,7 +109,7 @@ export function entryMapHtml(m: EntryMap, routes: Route[]): string {
       <button type="button" role="tab" class="em-tab" data-view="simple" aria-selected="true"><b>Simplified</b><span>The big picture, in plain words</span></button>
       <button type="button" role="tab" class="em-tab" data-view="expert" aria-selected="false"><b>Expert</b><span>Code names, branches, table</span></button>
     </div>
-    ${start ? `<div class="em-start only-simple"><b>New here?</b> <span>Start with <a href="#" data-goto="${esc(start.id)}">${esc(start.title)}</a>: it's short, and it shows how ${esc((areaTitle.get(start.area) ?? start.area).toLowerCase())} works. Then pick any area on the map.</span><button type="button" class="em-hide" aria-label="Hide">Hide</button></div>` : ""}
+    ${start ? `<div class="em-start only-simple"><b>New here?</b> <span>Start with <a href="#" data-goto="${esc(start.id)}">${esc(start.title)}</a>: it's short, and a good first look at ${/^(other|general|home)$/.test(start.area) ? "the code" : `the ${esc((areaTitle.get(start.area) ?? start.area).toLowerCase())} area`}. Then pick any area on the map.</span><button type="button" class="em-hide" aria-label="Hide">Hide</button></div>` : ""}
     <div class="em-strip only-expert"><b>Map</b><span>${routes.filter((r) => r.kind !== "middleware").length} entry points · ${counts}</span><button type="button" class="em-mapbtn">Show map</button></div>
     <div class="em-card">
       <div class="em-cols"><span>Who comes in</span><span>Where they go${journey ? " · in customer-journey order" : ""}</span><span>What it touches</span></div>

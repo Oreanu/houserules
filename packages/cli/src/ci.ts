@@ -86,7 +86,7 @@ function markdown(r: CiResult, base?: string): string {
     for (const t of r.touched.slice(0, 40)) lines.push(`- ${plain(t.title)} (${t.where}): ${t.files.map((f) => `\`${f}\``).join(", ")}`);
     lines.push("", "</details>");
   }
-  if (r.broken.length || r.drifted.length) lines.push("", "Refresh them with `npx houserules generate`, or edit `.houserules/docs.json` and re-run `npx houserules render`.");
+  if (r.broken.length || r.drifted.length) lines.push("", `Refresh them with \`${HR} generate\`, or edit \`.houserules/docs.json\` and re-run \`${HR} render\`.`);
   return lines.join("\n") + "\n";
 }
 
@@ -143,12 +143,17 @@ jobs:
             else await github.rest.issues.createComment({ owner, repo, issue_number, body });
 `;
 
+const HR = (process.argv[1] ?? "").split(/[\\/]/).includes("_npx") ? "npx houserules" : "houserules";
+
 /** Writes .github/workflows/houserules.yml, after asking (or with --yes). */
 export async function runCiSetup(target: string, opts: { yes: boolean; dryRun: boolean }): Promise<number> {
   const root = path.resolve(target);
   const file = path.join(root, ".github", "workflows", "houserules.yml");
   const exists = await access(file).then(() => true, () => false);
   console.log(`${exists ? "Would replace" : "Would write"} ${path.relative(process.cwd(), file) || file}:\n\n${WORKFLOW}`);
+  // The workflow installs houserules from npm; say so now rather than let the first pull request fail.
+  const published = await fetch(`https://registry.npmjs.org/houserules/${VERSION}`, { signal: AbortSignal.timeout(5000) }).then((r) => r.ok, () => undefined);
+  if (published === false) console.log(`Note: houserules ${VERSION} isn't on npm yet, and this workflow installs it from there. The job will fail until it's published.\n`);
   if (opts.dryRun) return 0;
   if (!opts.yes) {
     if (!process.stdin.isTTY) {

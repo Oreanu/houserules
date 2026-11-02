@@ -136,7 +136,7 @@ const HIDDEN_SERVICE = new Set(["observability", "http-client"]);
 export function audienceOf(r: Route): AudienceId {
   if (r.kind === "job") return "automatic";
   const mw = (r.middleware ?? []).join(" ");
-  if (r.kind === "webhook" || /\bverify\.\w+|webhook|\bsigned\b|client_credentials/i.test(mw)) return "systems";
+  if (r.kind === "webhook" || /\bverify\.\w+|webhook|\bsigned\b|client_credentials|csrf_exempt/i.test(mw)) return "systems";
   if (/auth:admin|ability:admin|role:(admin|staff)|is_?admin|VerifyAdmins?|\badmin\b/i.test(mw) || /^\/(api\/)?(v\d+\/)?admin(\/|$)/.test(r.path) || /\/admin(\/|$)/.test(r.path)) return "staff";
   if (/(^|\s)(auth(:[\w-]+)?|verified|Authenticate)(\s|$)/.test(mw) || /^\/(api\/)?(v\d+\/)?(me|user|account)(\/|$)/.test(r.path)) return "customers";
   if (r.kind === "page" || r.kind === "screen") return "website";
@@ -172,6 +172,7 @@ const titleCase = (id: string) => (id === "other" ? "Other areas" : id === "back
 
 // ---------- titles ----------
 
+const SIGN: Record<string, string> = { login: "sign in", logout: "sign out", signin: "sign in", signout: "sign out", signup: "sign up", register: "sign up" };
 const ACTION: Record<string, string> = { index: "List", show: "View", store: "Create", create: "Form to create", edit: "Form to edit", update: "Update", destroy: "Delete", delete: "Delete" };
 // Mostly-noun words (order, report, request, price…) are left out: in class names they name things, not actions.
 const VERBS = new Set("accept activate adjust allocate append assert attempt authenticate broadcast build buy calculate capture claim clone commit compare compose compute convert count create decrement deduct deliver deny deploy destroy dispatch emit encode encrypt ensure enqueue enrich estimate evaluate expire extract fill filter finalise finalize flush format forward grant handle hash hydrate increment init initialise initialize insert load migrate normalise normalize notify parse pay persist prepare prune purchase push queue read rebuild recalculate receive recompute reconcile redeem refill render renew reserve resolve respond reverse rotate scan seed select sell serialize settle ship sign signup split store subtract summarise summarize trigger trim uncache unset upsert use warm write ".split(" ").concat("add apply approve archive assign attach ban block book bulk calculate cancel change charge check clear close collect complete confirm connect copy create decline delete detach disable disapprove disconnect dismiss download duplicate edit enable export fetch find fix flag forget generate get import invite join leave link list lock log login logout mark merge move notify open pause pin preview process publish purge reactivate redirect refresh refund regenerate register reject reload remove reorder replace reset restart restore resend resume retry revoke run save schedule search send set show skip sort start stop store submit subscribe suspend swap sync test toggle track transfer unban unblock unlink unlock unmark unpin unsubscribe update upgrade upload validate verify view void".split(" ")));
@@ -182,7 +183,10 @@ export function routeTitle(r: Route): string {
   if (r.kind === "action") return sentence(words(r.handler).join(" "));
   const view = r.handler.match(/^view\s+(\S+)/);
   if (view) return `${sentence(words(view[1]!.split(".").pop()!).join(" "))} page`;
-  if ((r.kind === "page" || r.kind === "screen") && !r.name && (!r.methods || r.methods.includes("GET"))) {
+  const dashed = r.name && !r.name.includes(".") ? dashedTitle(r) : undefined;
+  if (dashed) return dashed;
+  if ((r.kind === "page" || r.kind === "screen") && (!r.name || !r.name.includes(".")) && (!r.methods || r.methods.includes("GET"))) {
+    if (r.name) return r.path === "/" ? "Home page" : `${sentence(nameWords(r, r.name).join(" "))} page`;
     const segs = r.path.split("/").filter((s) => s && !s.startsWith(":") && !s.startsWith("*"));
     return segs.length ? `${sentence(words(segs.join(" ")).join(" "))} page` : /:/.test(r.path) ? "Content page" : "Home page";
   }
@@ -208,8 +212,42 @@ export function routeTitle(r: Route): string {
     if (verbAt > 0) return sentence([...w.slice(verbAt), ...w.slice(0, verbAt)].join(" "));
     if (verbAt === 0) return sentence(w.join(" "));
   }
+  // A plain Python view function (Django): its name, plus what the URL adds after it ("ping" on /ping/:code/fail).
+  const pathWords = r.path.split("/").flatMap((s) => (s.startsWith(":") ? [] : words(s)));
+  if (cls && !method && /^[a-z][a-z0-9_]*$/.test(cls) && !/^(single|index|details?|list|view|show|get)$/.test(cls) && !(/s$/.test(cls) && pathWords.includes(cls))) {
+    const own = words(cls);
+    const tail = r.path.split("/").filter(Boolean).pop() ?? "";
+    return sentence([...own, ...(tail && !tail.startsWith(":") ? words(tail).filter((w) => !own.includes(w)) : [])].join(" "));
+  }
   const verb = { GET: /\/:\w+\??$/.test(r.path) ? "View" : "List", POST: "Create", PUT: "Update", PATCH: "Update", DELETE: "Delete" }[r.methods?.[0] ?? "GET"] ?? "Open";
   return resource.length ? `${verb} ${resource.slice(-2).map((s) => words(s).join(" ")).join(" ")}` : `${r.methods?.join(" ") ?? ""} ${r.path}`.trim();
+}
+
+/** The name's words, without a short app prefix ("hc-update-name" → update, name) and with the URL's resource in front when the name leaves it out. */
+function nameWords(r: Route, name: string): string[] {
+  const w = words(name);
+  if (w.length > 1 && w[0]!.length <= 3 && !VERBS.has(w[0]!) && !ACTION[w[0]!]) w.shift();
+  const resource = r.path.split("/").find((s) => s && !s.startsWith(":") && !s.startsWith("*") && !NOT_A_RESOURCE.test(s));
+  const noun = resource ? singular(words(resource).join(" ")) : undefined;
+  return noun && !w.some((x) => singular(x) === noun) && !w.includes(noun) ? [noun, ...w] : w;
+}
+
+/** Django-style names ("hc-pause", "update_timeout"): the verb from the name, the object from the URL: "Pause a check". */
+function dashedTitle(r: Route): string | undefined {
+  const w = words(r.name!);
+  if (w.length > 1 && w[0]!.length <= 3 && !VERBS.has(w[0]!) && !ACTION[w[0]!]) w.shift();
+  const at = w.findIndex((x) => VERBS.has(x) || ACTION[x]);
+  if (at < 0) return r.methods?.length && !r.methods.includes("GET") ? sentence(`update ${nameWords(r, r.name!).join(" ")}`) : undefined;
+  const rest = w.slice(at + 1);
+  const sign = SIGN[w[at]!];
+  if (sign) return rest.length ? sentence(`${sign} ${rest.join(" ")}`) : sentence(sign);
+  if (!rest.length && ACTION[w[at]!] && r.path === "/") return undefined; // "hc-index" on / is the home page
+  const resource = r.path.split("/").find((s) => s && !s.startsWith(":") && !s.startsWith("*") && !NOT_A_RESOURCE.test(s));
+  let noun = resource ? singular(words(resource).join(" ")) : "";
+  if (w.slice(0, at + 1).some((x) => singular(x) === noun)) noun = ""; // POST /login named "login"
+  if (!rest.length) return phrase(w[at]!, noun ? [noun] : []);
+  if (!noun || rest.some((x) => singular(x) === noun)) return phrase(w[at]!, [rest.join(" ")]);
+  return phrase(`${w[at]}-${rest.join("-")}`, [noun]);
 }
 
 function phrase(action: string, nouns: string[]): string {
@@ -226,10 +264,12 @@ function phrase(action: string, nouns: string[]): string {
 function jobTitle(r: Route): string {
   const cls = r.handler.split(".")[0] ?? r.handler;
   // A scheduled artisan command is named by the command itself (`model:prune`), not by its arguments.
-  const command = r.path.match(/^scheduled\s+([\w-]+:[\w:-]+)/)?.[1];
+  const command = r.path.match(/^scheduled\s+([\w-]+:[\w:-]+)/)?.[1] ?? r.path.match(/^manage\.py\s+(\S+)/)?.[1];
   const name = command ? command : /closure|schedule|inline/.test(cls) ? r.path.replace(/^(artisan|scheduled|queued|queue|task|console)\s+/, "").replace(/\s*\(.*\)$/, "") : cls.replace(/(Job|Command|Task|Listener)$/, "");
   const when = r.path.match(/\(([^)]+)\)$/)?.[1];
-  const base = sentence(words(name.replace(/[:]/g, " ")).join(" "));
+  // Django commands are often one run-together word: "sendalerts" → "send alerts".
+  const glued = (w: string) => { const v = /^[a-z]{7,}$/.test(w) ? [...VERBS].filter((x) => x.length >= 3 && w.startsWith(x) && w.length - x.length >= 4).sort((a, b) => b.length - a.length)[0] : undefined; return v ? `${v} ${w.slice(v.length)}` : w; };
+  const base = sentence(words(name.replace(/[:]/g, " ")).map((w) => (r.path.startsWith("manage.py") ? glued(w) : w)).join(" "));
   return when && r.path.startsWith("scheduled") ? `${base} (${scheduleWords(when)})` : base;
 }
 
@@ -259,7 +299,10 @@ export function guardLabel(m: string): string | undefined {
   const [name, arg = ""] = m.split(":");
   const args = arg.split(",");
   if (/^(auth:admin|ability:admin|role:admin|VerifyAdmins?)$/.test(m) || /^(admin|is_admin)$/.test(name!)) return "Staff only";
+  if (m === "auth:api-key") return "Needs an API key";
   if (name === "auth" || name === "Authenticate") return "Must be signed in";
+  if (m === "csrf_exempt") return "Called by other programs (no CSRF check)";
+  if (m === "permission") return "Needs a permission";
   if (name === "can" && args[0]) return `Must be allowed to ${words(args[0]).join(" ")}${args[1] ? ` this ${words(args[1]).join(" ")}` : ""}`;
   if (name === "throttle" && args[0]) return `At most ${args[0]} ${args[1] && args[1] !== "1" ? `every ${args[1]} minutes` : "a minute"}`;
   if (name === "verified" || name === "EnsureEmailIsVerified") return "Email must be verified";

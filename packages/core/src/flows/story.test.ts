@@ -130,3 +130,28 @@ test("every way in tells a story: container-resolved builders, return-type chain
   assert.equal(m.stories.get(routes.find((x) => x.path === "/privacy")!.id)!.steps[0]!.label, "Show the privacy page template");
   assert.match(m.stories.get(routes.find((x) => /horizon:snapshot/.test(x.path))!.id)!.steps[0]!.label, /`horizon:snapshot`, a command that comes with a package/);
 });
+
+test("Django: who may call a view comes from its decorators, titles from route names, and channel folders aren't services", async () => {
+  const root = await makeTree({
+    "requirements.txt": "django==5.0\n",
+    "app/urls.py": `from django.urls import include, path\nfrom app import views\n\nbooking_urls = [\n    path("pause/", views.pause, name="bk-pause"),\n    path("name/", views.update_name, name="bk-update-name"),\n    path("details/", views.details, name="bk-details"),\n]\n\nurlpatterns = [\n    path("", views.index, name="bk-index"),\n    path("bookings/<uuid:code>/", include(booking_urls)),\n    path("ping/<uuid:code>", views.ping),\n    path("admin-report/", views.report),\n    path("accounts/login/", views.login, name="bk-login"),\n]\n`,
+    "app/views.py": `from django.contrib.auth.decorators import login_required\nfrom django.contrib.admin.views.decorators import staff_member_required\nfrom django.views.decorators.csrf import csrf_exempt\nfrom django.views.decorators.http import require_POST\n\ndef index(request):\n    pass\n\n@require_POST\n@login_required\ndef pause(request, code):\n    pass\n\n@require_POST\n@login_required\ndef update_name(request, code):\n    pass\n\n@login_required\ndef details(request, code):\n    pass\n\n@csrf_exempt\ndef ping(request, code):\n    pass\n\n@staff_member_required\ndef report(request):\n    pass\n\ndef login(request):\n    pass\n`,
+    "app/integrations/webhook/transport.py": "def send(): pass\n",
+    "app/integrations/pd/transport.py": "def send(): pass\n",
+  });
+  const a = await scan(root);
+  const routes = await listRoutes(root, a);
+  const at = (p: string) => routes.find((x) => x.path === p)!;
+  assert.deepEqual([at("/bookings/:code/pause/").methods, at("/bookings/:code/pause/").middleware], [["POST"], ["auth"]], "prefix from include(list), method and guard from decorators");
+  assert.equal(audienceOf(at("/bookings/:code/pause/")), "customers");
+  assert.equal(audienceOf(at("/ping/:code")), "systems");
+  assert.equal(audienceOf(at("/admin-report/")), "staff");
+  assert.equal(routeTitle(at("/bookings/:code/pause/")), "Pause a booking");
+  assert.equal(routeTitle(at("/bookings/:code/name/")), "Update booking name");
+  assert.equal(routeTitle(at("/bookings/:code/details/")), "Booking details page");
+  assert.equal(routeTitle(at("/")), "Home page");
+  assert.equal(routeTitle(at("/accounts/login/")), "Sign in");
+  assert.equal(routeTitle(r({ kind: "job", path: "manage.py sendalerts", handler: "Command.handle", file: "app/management/commands/sendalerts.py" })), "Send alerts");
+  const names = a.integrations.map((i) => i.name);
+  assert.ok(names.includes("PagerDuty") && !names.some((n) => /webhook/i.test(n)), names.join(", "));
+});

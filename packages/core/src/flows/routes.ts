@@ -141,13 +141,45 @@ async function djangoRoutes(files: string[], read: Read, lineOf: LineOf, push: P
       if (target) prefixes.set(target, (prefixes.get(p) ?? "") + m[1]!);
     }
   }
+  // path("checks/<uuid:code>/", include(check_urls)) where check_urls = [...] is a list in the same file.
+  const listPrefix = (p: string, text: string, at: number): string => {
+    let out = "";
+    for (const m of text.matchAll(/(?:re_)?path\(\s*r?['"]([^'"]*)['"]\s*,\s*include\(\s*(\w+)\s*\)/g)) {
+      const def = text.match(new RegExp(`^${m[2]}\\s*=\\s*\\[`, "m"));
+      if (!def) continue;
+      const start = def.index! + def[0].length;
+      let depth = 1, end = start;
+      while (end < text.length && depth) depth += text[end] === "[" ? 1 : text[end] === "]" ? -1 : 0, end++;
+      // A list included under several prefixes (api/v1/, api/v2/…): the last one, usually the current version.
+      if (at > start && at < end) out = listPrefix(p, text, m.index!) + m[1]!.replace(/^\^/, "");
+    }
+    return out;
+  };
+  const views = await djangoViews(files.filter((f) => f.endsWith(".py") && !/(^|\/)(tests?|migrations)(\/|_|\.)/.test(f)), read);
   for (const [p, text] of texts) {
     for (const m of text.matchAll(/(?:re_)?path\(\s*r?['"]([^'"]*)['"]\s*,\s*([\w.]+?)(\.as_view\(\))?\s*[,)]/g)) {
       if (m[2] === "include") continue;
-      const url = "/" + ((prefixes.get(p) ?? "") + m[1]!).replace(/<(?:\w+:)?(\w+)>/g, ":$1").replace(/^\^|\$$/g, "");
+      const url = "/" + ((prefixes.get(p) ?? "") + listPrefix(p, text, m.index!) + m[1]!.replace(/^\^/, "")).replace(/<(?:\w+:)?(\w+)>/g, ":$1").replace(/^\^|\$$/g, "");
       const handler = m[2]!.split(".").pop()!;
-      const kind = WEBHOOK.test(url) ? "webhook" : /\bapi\b/.test(url) || /ViewSet|APIView/.test(handler) ? "api" : "page";
-      push({ kind, path: url.replace(/\/+/g, "/"), file: p, line: lineOf(text, m.index!), handler });
+      // The rest of this path(...) call, for name="…".
+      const rest = text.slice(m.index! + m[0].length - 1, text.indexOf("\n", m.index! + m[0].length) + 1 || undefined);
+      const name = rest.match(/\bname\s*=\s*['"]([^'"]+)['"]/)?.[1];
+      const dir = path.posix.dirname(p);
+      const found = views.get(handler) ?? [];
+      const view = found.find((v) => path.posix.dirname(v.file) === dir || path.posix.dirname(v.file) === `${dir}/views`) ?? (found.length === 1 ? found[0] : undefined);
+      const api = /\bapi\b/.test(url) || /ViewSet|APIView/.test(handler) || Boolean(view?.api);
+      const kind = WEBHOOK.test(url) ? "webhook" : api || view?.guards.includes("csrf_exempt") ? "api" : "page";
+      push({
+        kind,
+        path: url.replace(/\/+/g, "/"),
+        file: p,
+        line: lineOf(text, m.index!),
+        handler,
+        ...(view && view.file !== p ? { handlerFile: view.file } : {}),
+        ...(view?.methods ? { methods: view.methods } : {}),
+        ...(view?.guards.length ? { middleware: view.guards } : {}),
+        ...(name ? { name } : {}),
+      });
     }
   }
   for (const p of files.filter((f) => /\/management\/commands\/(?!_)\w+\.py$/.test(f))) {
@@ -157,6 +189,51 @@ async function djangoRoutes(files: string[], read: Read, lineOf: LineOf, push: P
     const text = await read(p);
     for (const m of text.matchAll(/@(?:shared_task|app\.task|\w+\.task)(?:\([^)]*\))?\s*\n\s*def\s+(\w+)/g)) push({ kind: "job", path: `task ${m[1]}`, file: p, line: lineOf(text, m.index!), handler: m[1]! });
   }
+}
+
+interface DjangoView {
+  file: string;
+  guards: string[]; // as middleware: "auth", "admin", "permission:x", "csrf_exempt"
+  methods?: string[];
+  api?: boolean;
+}
+
+/**
+ * Who may call each Django view, read from its decorators (@login_required, @csrf_exempt, @require_POST…),
+ * class mixins (LoginRequiredMixin) and DRF permission_classes. Keyed by function or class name.
+ */
+async function djangoViews(files: string[], read: Read): Promise<Map<string, DjangoView[]>> {
+  const out = new Map<string, DjangoView[]>();
+  const add = (name: string, v: DjangoView) => out.set(name, [...(out.get(name) ?? []), v]);
+  for (const file of files) {
+    const text = await read(file);
+    if (!/^\s*@|\bclass\s+\w+\(.*(View|Mixin)/m.test(text)) continue;
+    for (const m of text.matchAll(/^((?:@[^\n]+\n)*)(?:async\s+)?(def|class)\s+(\w+)\s*(?:\(([^)]*)\))?/gm)) {
+      const [, decorators = "", what, name, args = ""] = m;
+      let source = decorators;
+      if (what === "class") {
+        const end = text.slice(m.index! + m[0].length).search(/\n(?:class|def|@)\b/);
+        source += `\n${args}\n${text.slice(m.index! + m[0].length, end < 0 ? undefined : m.index! + m[0].length + end)}`;
+      } else if (!decorators && !/\brequest\b/.test(args)) continue;
+      add(name!, { file, ...djangoGuards(source), ...(what === "class" && /APIView|ViewSet|permission_classes/.test(source) ? { api: true } : {}) });
+    }
+  }
+  return out;
+}
+
+function djangoGuards(src: string): Omit<DjangoView, "file"> {
+  const guards: string[] = [];
+  const has = (re: RegExp) => re.test(src);
+  if (has(/staff_member_required|IsAdminUser|is_staff|is_superuser|superuser_required/)) guards.push("admin");
+  if (has(/login_required|LoginRequiredMixin|\bIsAuthenticated\b|IsAuthenticatedOrReadOnly|require_sudo_mode/)) guards.push("auth");
+  else if (has(/@\w*(authori[sz]e|api_?key|token_required)\w*/i)) guards.push("auth:api-key");
+  for (const p of src.matchAll(/permission_required\(\s*['"]([\w.]+)['"]/g)) guards.push(`permission:${p[1]!.split(".").pop()}`);
+  if (has(/PermissionRequiredMixin/) && !guards.some((g) => g.startsWith("permission"))) guards.push("permission");
+  if (!guards.length && has(/@csrf_exempt/)) guards.push("csrf_exempt"); // no session and no CSRF token: called by other programs
+  const only = src.match(/@require_(GET|POST|safe)\b/)?.[1];
+  const listed = src.match(/@require_http_methods\(\s*\[([^\]]*)\]/)?.[1]?.match(/[A-Z]+/g);
+  const methods = only ? (only === "safe" ? ["GET", "HEAD"] : [only]) : listed ?? undefined;
+  return { guards, ...(methods ? { methods } : {}) };
 }
 
 async function springRoutes(files: string[], read: Read, lineOf: LineOf, push: Push): Promise<void> {

@@ -40,6 +40,9 @@ export interface State {
 const md = new Marked({ gfm: true, breaks: false });
 md.use({ renderer: { html: ({ text }) => esc(text) } }); // agent-written text never injects raw HTML
 
+// How to tell people to run houserules: the way it was started (npx), or the installed command.
+const HR = (process.argv[1] ?? "").split(/[\\/]/).includes("_npx") ? "npx houserules" : "houserules";
+
 // ---------- brand (same shapes as assets/brand/) ----------
 
 const FAVICON = `data:image/svg+xml,${encodeURIComponent(
@@ -296,7 +299,7 @@ export function overview(s: State): string {
   return `<main class="page"><article class="reading wide">${header}${figures}
     ${section("Needs a look", issues.length ? "The code behind these changed since they were written. Re-read them, or run <code>houserules generate</code> to refresh them." : "", issues.length ? `<ul class="issues">${issues.join("")}</ul>` : `<p class="all-good"><i class="dot ok"></i>All ${s.total} items were re-checked just now and still match.</p>`)}
     ${section("Docs coverage", "", coverage)}
-    ${s.rules.length ? section("House rules", "Checked on every pull request and by agents before they finish a change.", rulesHtml(s)) : section("House rules", "", `<p class="start-p">No checked rules yet. Run <code>npx houserules generate</code> to turn the guidelines into checks, then <code>npx houserules ci-setup</code> to run them on every pull request.</p>`)}
+    ${s.rules.length ? section("House rules", "Checked on every pull request and by agents before they finish a change.", rulesHtml(s)) : section("House rules", "", `<p class="start-p">No checked rules yet. Run <code>${HR} generate</code> to turn the guidelines into checks, then <code>${HR} ci-setup</code> to run them on every pull request.</p>`)}
     ${scanSections(s, sum, section)}
   </article></main>`;
 }
@@ -332,7 +335,7 @@ function scanSections(s: State, sum: ReturnType<typeof summarize>, section: (t: 
 function emptyState(): string {
   return `<section class="hsec first"><h2>Write the docs</h2>
     <p class="start-p">Run one command. It uses your own Claude Code or Codex to read the code and write the architecture, guidelines and lessons. Every claim is checked against the code before it's kept, and it can't edit your files.</p>
-    <pre class="listing"><code>npx houserules generate</code></pre>
+    <pre class="listing"><code>${HR} generate</code></pre>
     <p class="section-intro">Takes a while on a big repo. Until then, the diagrams already work: they're drawn straight from the code. <a href="/diagrams#entry">Explore how work gets in ›</a></p></section>`;
 }
 
@@ -874,7 +877,7 @@ export function learnPage(s: State): string {
     ${lessons.length ? `<ul class="hero-facts">${facts.map((f) => `<li>${esc(f)}</li>`).join("")}</ul>` : ""}</header>`;
   if (!lessons.length) {
     return `<main class="start">${hero}<div class="start-body"><section class="start-sec first"><h2>No lessons yet</h2>
-      <p class="start-p">Run <code>npx houserules generate</code>, or ask your agent to "use houserules to write the lessons". It reads the latest official docs for your stack, follows your entry points, and every quote and code reference is checked before it's saved.</p></section></div></main>`;
+      <p class="start-p">Run <code>${HR} generate</code>, or ask your agent to "use houserules to write the lessons". It reads the latest official docs for your stack, follows your entry points, and every quote and code reference is checked before it's saved.</p></section></div></main>`;
   }
   const chapters = TRACKS.map((t, ti) => {
     const list = s.lessons.tracks[t.id]?.lessons ?? [];

@@ -42,7 +42,7 @@ lines and names exist; it can't prove your claim is right, so only write what th
 - **Changed code?** Call `check_rules` before you say you're done. Fix new violations, or tell the user why a
   rule doesn't apply here.
 
-If the MCP server isn't connected, tell the user to run `npx houserules init` and restart the agent.
+If the MCP server isn't connected, tell the user to run `houserules init` (from the houserules install) and restart the agent.
 
 ## Workflow
 
@@ -74,11 +74,11 @@ If the MCP server isn't connected, tell the user to run `npx houserules init` an
 7. **Write the lessons** (see "Writing lessons"): `get_lesson_plan`, then one `submit_lessons` call per track
    (`foundations`, `repo`, `mastery`). Fix rejections the same way as sections.
 8. **Render** with `render_docs`, then tell the user what was written and anything you couldn't verify.
-   Suggest `npx houserules preview` to browse the docs with clickable evidence.
+   Suggest `houserules preview` to browse the docs with clickable evidence.
 9. **Don't commit unless the user asks.** Tell them which files belong in git:
    - commit: `docs/houserules/`, `AGENTS.md`, `CLAUDE.md`, `.houserules/docs.json`, `.houserules/lessons.json`,
      `.houserules/answers.json`, `.houserules/rules.json`, `.houserules/entrypoints.json`, `.houserules/.gitignore`
-   - suggest `npx houserules ci-setup` so every pull request is checked against the docs and the rules
+   - suggest `houserules ci-setup` so every pull request is checked against the docs and the rules
    - don't commit: `.houserules/analysis.json` and `.houserules/cache/` (regenerated, already gitignored)
    - `.mcp.json` and `.claude/skills/houserules/`: commit them only if the server command in `.mcp.json` is
      portable (`npx …`); an absolute path to someone's local install only works on their machine.

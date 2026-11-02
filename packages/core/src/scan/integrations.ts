@@ -166,7 +166,15 @@ const CLIENT_CATEGORY: Record<string, IntegrationCategory> = {
   stripe: "payments", checkoutcom: "payments", applepay: "payments", paypal: "payments", adyen: "payments", gocardless: "payments", paystack: "payments", braintree: "payments",
   algolia: "search", typesense: "search", meilisearch: "search", openai: "ai", anthropic: "ai",
 };
-const CLIENT_NAME: Record<string, string> = { checkoutcom: "Checkout.com", applepay: "Apple Pay", dpd: "DPD", ups: "UPS", dhl: "DHL", fedex: "FedEx", usps: "USPS", hubspot: "HubSpot", gocardless: "GoCardless" };
+const CLIENT_NAME: Record<string, string> = {
+  checkoutcom: "Checkout.com", applepay: "Apple Pay", dpd: "DPD", ups: "UPS", dhl: "DHL", fedex: "FedEx", usps: "USPS", hubspot: "HubSpot", gocardless: "GoCardless",
+  // Short folder names some repos use for well-known services.
+  pd: "PagerDuty", pagerduty: "PagerDuty", po: "Pushover", msteams: "Microsoft Teams", msteamsw: "Microsoft Teams", googlechat: "Google Chat", rocketchat: "Rocket.Chat",
+  victorops: "VictorOps", opsgenie: "Opsgenie", pagertree: "PagerTree", github: "GitHub", gitlab: "GitLab", whatsapp: "WhatsApp", pushbullet: "Pushbullet", ntfy: "ntfy",
+};
+// Folders named for a kind of channel rather than a company: a notifications app's integrations/email/ or
+// integrations/webhook/ is its own feature, not an outside service.
+const NOT_A_SERVICE = /^(index|utils?|helpers?|shared|common|base|core|contracts?|tests?|shell|webhooks?|e?mail|sms|calls?|groups?|http|api|rest|generic|custom|internal|__\w+__)$/i;
 
 /**
  * Outside APIs a repo calls through its own client: an `integrations/<Name>/` folder (Saloon's layout for Laravel,
@@ -180,7 +188,7 @@ export function detectOwnClients(paths: string[], imports: ImportEdge[], known: 
   for (const p of paths) {
     if (TEST_DIR.test(p)) continue; // tests mirror the client layout
     const m = p.match(/^(.*?\/[Ii]ntegrations\/([A-Z][\w-]*|[a-z][\w-]*))\//);
-    if (m && !/^(index|utils?|shared|common|base|contracts?|tests?)$/i.test(m[2]!)) dirs.set(m[1]!, m[2]!);
+    if (m && !NOT_A_SERVICE.test(m[2]!)) dirs.set(m[1]!, m[2]!);
   }
   const byName = new Map<string, { name: string; dirs: string[] }>();
   for (const [dir, folder] of dirs) {
