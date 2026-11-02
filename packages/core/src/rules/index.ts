@@ -199,7 +199,7 @@ export async function changedFiles(rootDir: string, base?: string): Promise<stri
   try {
     const git = (args: string[]) => run("git", args, { cwd: root, maxBuffer: 16 * 1024 * 1024 }).then((r) => r.stdout.split("\n").filter(Boolean));
     const files = base ? await git(["diff", "--name-only", `${base}...HEAD`]) : [...(await git(["diff", "--name-only", "HEAD"])), ...(await git(["ls-files", "--others", "--exclude-standard"]))];
-    return [...new Set(files)];
+    return [...new Set(files)].filter((f) => !f.startsWith(".houserules/")); // our own output isn't part of the change
   } catch {
     return null;
   }

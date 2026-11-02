@@ -26,7 +26,7 @@ export async function runVerify(target: string, opts: { json: boolean }): Promis
     return report.broken.length ? 1 : 0;
   }
   if (report.total === 0) {
-    console.log("No generated docs yet. Run houserules in Claude Code or Codex first.");
+    console.log("No generated docs yet. Run `houserules generate` to write them.");
     return 0;
   }
   console.log(`Checked ${report.total} item(s): ${report.broken.length} broken, ${report.changed.length} with changed evidence.`);
