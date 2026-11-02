@@ -556,10 +556,23 @@ async function nodeRoutes(files: string[], read: Read, lineOf: LineOf, push: Pus
     for (const m of text.matchAll(/\b(\w+)\.(get|post|put|patch|delete|all|options|head)\s*\(\s*(['"`])([^'"`]*)\3/g)) {
       if (!routers.has(m[1]!) || !(m[4]!.startsWith("/") || m[4] === "*" || m[4] === "")) continue;
       const args = callArgs(text, text.indexOf("(", m.index! + m[1]!.length + m[2]!.length));
-      const last = args[args.length - 1];
-      if (!last || args.length < 2) continue;
+      if (!args[args.length - 1] || args.length < 2) continue;
+      const { handler: last, wrappers: wrapped } = unwrapHandler(args[args.length - 1]!);
+      // router.get("/x", requireAuth, can("edit"), controller.x): what runs before the handler, as written.
+      // Only when every middle argument looks like a guard: a name or a call. Anything else means the split went
+      // wrong (a regex literal in an inline handler can do that), and a wrong guard is worse than none.
+      const middle = args.slice(1, -1).map((a) => a.text.trim());
+      const guardish = middle.every((t) => /^[A-Za-z_$][\w$.]*(\s*\([^\n]*\))?$/.test(t) && !/^(async|await|function|return|new|true|false|null|undefined)\b/.test(t));
+      const wrappers = [
+        ...(guardish ? args.slice(1, -1) : []).flatMap((a) => {
+          const t = a.text.trim(), call = t.match(/^([\w$.]+)\s*\(/);
+          if (call) return [guardName(call[1]!, callArgs(t, t.indexOf("(", call[0].length - 1)))];
+          return /^[\w$.]+$/.test(t) ? [t] : [];
+        }),
+        ...wrapped,
+      ];
       const url = joinUrl(prefix.get(p) ?? "", m[4]!).replace(/\{(\w+)\}/g, ":$1");
-      const base = { kind: (WEBHOOK.test(url) ? "webhook" : "api") as RouteKind, path: url, methods: [m[2]!.toUpperCase().replace("ALL", "ANY")], file: p, line: lineOf(text, m.index!) };
+      const base = { kind: (WEBHOOK.test(url) ? "webhook" : "api") as RouteKind, path: url, methods: [m[2]!.toUpperCase().replace("ALL", "ANY")], file: p, line: lineOf(text, m.index!), ...(wrappers.length ? { middleware: wrappers } : {}) };
       if (isInlineFn(last.text)) push({ ...base, handler: "inline handler", inline: [lineOf(text, last.start), lineOf(text, last.start + last.text.length)] });
       else push({ ...base, handler: handlerLabel(last.text) });
     }
@@ -575,6 +588,45 @@ async function nodeRoutes(files: string[], read: Read, lineOf: LineOf, push: Pus
       push({ kind: WEBHOOK.test(full) ? "webhook" : "api", path: full, methods, file: p, line: lineOf(text, m.index!), handler: h, ...(h === "inline handler" ? { inline: [lineOf(text, m.index!), lineOf(text, m.index! + body.length)] as [number, number] } : {}) });
     }
   }
+}
+
+/**
+ * A handler passed through a wrapper: `guarded("web", "read", "Route", controller.route)`, `asyncHandler(list)`,
+ * `catchErrors((req, res) => …)`. The function inside is what runs, so trace that; the wrapper itself (usually
+ * an auth or error guard) is kept as middleware, as written. A factory with no function inside (`cors()`) stays.
+ */
+function unwrapHandler(arg: { text: string; start: number }): { handler: { text: string; start: number }; wrappers: string[] } {
+  const wrappers: string[] = [];
+  let cur = arg;
+  for (let depth = 0; depth < 4; depth++) {
+    const call = cur.text.match(/^(?:await\s+)?([\w$.]+)\s*\(/);
+    if (!call || isInlineFn(cur.text) || !cur.text.trimEnd().endsWith(")")) break;
+    const open = cur.text.indexOf("(", call.index! + call[0].length - 1);
+    const inner = callArgs(cur.text, open);
+    // The function passed in: an inline function, or a reference (`controller.route`, `list`), last one wins.
+    // Wrappers take the function last (guarded(..., controller.route), asyncHandler(list)). A bare name only counts
+    // when the wrapper is named like one: swaggerUi.setup(specs, {...}) passes data, not a handler.
+    const lastArg = inner[inner.length - 1];
+    const t = lastArg?.text.trim() ?? "";
+    const wrapperName = /handler|async|wrap|catch|guard|safe|try|protect|route|controller/i.test(call[1]!);
+    const fn =
+      lastArg && (isInlineFn(t) || /^[A-Za-z_$][\w$]*(\.[\w$]+)+(\.bind\([^)]*\))?$/.test(t) || /^[A-Za-z_$][\w$]*\.bind\(/.test(t) || (wrapperName && /^[A-Za-z_$][\w$]*$/.test(t) && !/^(true|false|null|undefined)$/.test(t)))
+        ? lastArg
+        : // asyncHandler(guarded("web", controller.route)): the last argument is another wrapper; look inside it.
+          lastArg && wrapperName && /^[\w$.]+\s*\([\s\S]*\)$/.test(t)
+          ? lastArg
+          : undefined;
+    if (!fn) break;
+    wrappers.push(guardName(call[1]!, inner.filter((a) => a !== fn)));
+    cur = { text: fn.text.trim(), start: cur.start + fn.start };
+  }
+  return { handler: cur, wrappers };
+}
+
+/** A guard as written, with its plain arguments: auth("manageUsers") → "auth:manageUsers", validate(schema) → "validate". */
+function guardName(name: string, args: { text: string }[]): string {
+  const plain = args.map((a) => a.text.trim()).filter((x) => /^(['"`][^'"`]*['"`]|\d+)$/.test(x)).map((x) => x.replace(/^['"`]|['"`]$/g, ""));
+  return plain.length ? `${name}:${plain.join(",")}` : name;
 }
 
 /** `controller.list`, `this.list.bind(this)` → the function; a factory call like `cors()` → "cors(…)". */

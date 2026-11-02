@@ -155,3 +155,24 @@ test("Django: who may call a view comes from its decorators, titles from route n
   const names = a.integrations.map((i) => i.name);
   assert.ok(names.includes("PagerDuty") && !names.some((n) => /webhook/i.test(n)), names.join(", "));
 });
+
+test("Express: a handler passed through a wrapper is traced, and the wrapper is kept as a guard", async () => {
+  const root = await makeTree({
+    "package.json": JSON.stringify({ dependencies: { express: "^4" } }),
+    "src/guard.ts": `export function guarded(area: string, action: string, resource: string, fn: Function) {\n  return (req: any, res: any) => fn(req, res);\n}\nexport const asyncHandler = (fn: Function) => fn;\nexport function requireAuth(req: any, res: any, next: Function) { next(); }\n`,
+    "src/vehicles/service.ts": `export function loadRoute(id: string) {\n  return [id];\n}\n`,
+    "src/vehicles/controller.ts": `import { loadRoute } from "./service";\nexport const controller = {\n  route(req: any, res: any) {\n    res.json(loadRoute(req.params.id));\n  },\n};\n`,
+    "src/vehicles/routes.ts": `import { Router } from "express";\nimport { guarded, asyncHandler, requireAuth } from "../guard";\nimport { controller } from "./controller";\nexport const router = Router();\nrouter.get("/:id/route", guarded("web", "read", "RouteHistory", controller.route));\nrouter.get("/:id/again", requireAuth, asyncHandler(guarded("web", "read", "RouteHistory", controller.route)));\nrouter.get("/health", asyncHandler(async (req: any, res: any) => {\n  res.json({ ok: true });\n}));\n`,
+  });
+  const a = await scan(root);
+  const routes = await listRoutes(root, a);
+  const at = (p: string) => routes.find((x) => x.path === p)!;
+  assert.equal(at("/:id/route").handler, "controller.route");
+  assert.deepEqual(at("/:id/route").middleware, ["guarded:web,read,RouteHistory"]);
+  assert.equal(at("/:id/again").handler, "controller.route");
+  assert.deepEqual(at("/:id/again").middleware, ["requireAuth", "asyncHandler", "guarded:web,read,RouteHistory"]);
+  assert.equal(at("/health").handler, "inline handler");
+  const sym = await buildSymbolIndex(root, a);
+  const t = traceRoute(await buildCallGraph(root, a, sym), sym, at("/:id/route"));
+  assert.ok(t.steps.some((s) => /loadRoute/.test(s.name)), `the trace goes through the wrapper into the controller and its service: ${t.steps.map((s) => s.name).join(", ")}`);
+});
