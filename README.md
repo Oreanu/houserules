@@ -100,4 +100,5 @@ framework detection. Targets that don't exist in git (generated code, build outp
 not failures. Add a repo to `evals/repos.json` to cover a new stack or layout.
 
 Packages: `core` (engine), `cli` (`houserules` bin), `mcp` (MCP server), `skills` (SKILL.md).
+Want to help? Read [CONTRIBUTING.md](CONTRIBUTING.md) first.
 Node ≥ 20. MIT licensed.
