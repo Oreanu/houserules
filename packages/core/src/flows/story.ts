@@ -1,8 +1,8 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import type { SymbolIndex } from "../symbols/index.js";
+import type { SymbolDef, SymbolIndex } from "../symbols/index.js";
 import type { Analysis, Integration } from "../types.js";
-import type { Route } from "./routes.js";
+import { renamedRoute, type Route } from "./routes.js";
 import type { Trace, TraceStep } from "./trace.js";
 
 // The Entry points page in plain words: who comes in, which area of the app they reach, what that touches, and
@@ -67,6 +67,13 @@ export interface EntryOverrides {
 export function buildEntryMap(routes: Route[], traces: Map<string, Trace>, analysis: Analysis, overrides: EntryOverrides = {}): EntryMap {
   const clientDirs = ownClientDirs(analysis.integrations);
   const stories = new Map<string, Story>();
+  // Titles saved under an id an older houserules gave the route keep applying (see renamedRoute).
+  const titles = new Map(Object.entries(overrides.titles ?? {}));
+  const ids = new Set(routes.map((r) => r.id));
+  for (const [id, title] of Object.entries(overrides.titles ?? {})) {
+    const now = ids.has(id) ? undefined : renamedRoute(id, routes);
+    if (now && !overrides.titles?.[now.id]) titles.set(now.id, title);
+  }
   for (const r of routes) {
     if (r.kind === "middleware") continue;
     const t = traces.get(r.id);
@@ -74,7 +81,7 @@ export function buildEntryMap(routes: Route[], traces: Map<string, Trace>, analy
     const shown = steps.slice(0, MAX_STEPS);
     stories.set(r.id, {
       id: r.id,
-      title: overrides.titles?.[r.id] ?? routeTitle(r),
+      title: titles.get(r.id) ?? routeTitle(r),
       audience: audienceOf(r),
       area: areaOf(r),
       steps: shown,
@@ -356,7 +363,7 @@ function storySteps(r: Route, t: Trace, clientDirs: Map<string, string>): StoryS
   if (!out.some((o) => o.kind !== "guard")) {
     const h = t.steps[0]!;
     const [cls = h.name, method] = h.name.split(".");
-    const what = words(cls.replace(/(Controller|Job|Command|Listener|Handler|Action)$/, "")).join(" ");
+    const what = words(ownerOf(cls).replace(/(Controller|Job|Command|Listener|Handler|Action)$/, "")).join(" ");
     out.push({ label: `Handled in ${what}${method && method !== "__invoke" && method !== "handle" ? ` · ${words(method).join(" ")}` : ""}${t.steps.length === 1 ? ", with no further calls" : ""}`, code: h.name, kind: "code", ...(h.file ? { file: h.file } : {}), ...(h.line ? { line: h.line } : {}) });
   }
   return out;
@@ -426,8 +433,13 @@ function stepFor(s: TraceStep, clientDirs: Map<string, string>): StoryStep | und
   const w = words(method);
   // A story step is an action. Noun-like methods (cacheKey, deliveryPreference, withEvent) are lookups and plumbing.
   if (!VERBS.has(w[0]!)) return undefined;
-  const label = w.length === 1 ? `${sentence(w[0]!)} ${words(cls).join(" ")}` : sentence(w.join(" "));
+  const label = w.length === 1 ? `${sentence(w[0]!)} ${words(ownerOf(cls)).join(" ")}` : sentence(w.join(" "));
   return { label, code: s.name, kind: "code", ...where };
+}
+
+/** The thing a factory makes: `createOrderController` → `OrderController`, so `.show` reads "Show order controller". */
+function ownerOf(cls: string): string {
+  return cls.replace(/^(create|make|build|new)(?=[A-Z])/, "");
 }
 
 // Wrappers that only add error handling: their callees are the story.
@@ -551,14 +563,19 @@ export async function submitEntryOverrides(rootDir: string, routes: Route[], inp
     }
   }
   // The real handler of a route houserules couldn't follow. It must exist: the file, and a function or method by
-  // that name in it ("route", "TripController.list"), so a guess can't send the trace somewhere made up.
+  // that name in it ("route", "ProfileController.list", "createOrderController.show"), so a guess can't send the
+  // trace somewhere made up.
   for (const h of input.handlers ?? []) {
     const defs = symbols?.byFile.get(h.file);
     const name = h.symbol.trim();
-    const found = defs?.find((d) => d.name === name || `${d.container}.${d.name}` === name);
+    const found = defs && findQualified(defs, name);
     if (!routeIds.has(h.id)) rejected.push({ id: h.id, problem: "No entry point with this id (use list_entry_points)" });
     else if (!defs) rejected.push({ id: h.id, problem: `No file ${h.file} with code houserules can read (paths are relative to the repo root)` });
     else if (!found) rejected.push({ id: h.id, problem: `No function or method "${name}" in ${h.file}. Names there: ${defs.filter((d) => d.kind === "function" || d.kind === "method").map((d) => (d.container ? `${d.container}.${d.name}` : d.name)).slice(0, 30).join(", ")}` });
+    else if (!name.includes(".") && defs.filter((d) => d.name === name && (d.kind === "function" || d.kind === "method")).length > 1) {
+      const owners = defs.filter((d) => d.name === name && d.container).map((d) => `${d.container}.${d.name}`);
+      rejected.push({ id: h.id, problem: `"${name}" is defined more than once in ${h.file}; name the one you mean${owners.length ? ` (${owners.join(", ")})` : ""}` });
+    }
     else {
       (current.handlers ??= {})[h.id] = { file: h.file, symbol: name };
       accepted++;
@@ -567,4 +584,18 @@ export async function submitEntryOverrides(rootDir: string, routes: Route[], inp
   await mkdir(path.dirname(overridesPath(root)), { recursive: true });
   await writeFile(overridesPath(root), JSON.stringify(current, null, 2) + "\n");
   return { accepted, rejected };
+}
+
+/**
+ * A definition by plain or qualified name: `route`, `ProfileController.list`, `OrderControllerFactory.show` (an object
+ * member), or `createOrderController.show` for a function declared inside the factory that returns it.
+ */
+export function findQualified(defs: SymbolDef[], name: string): SymbolDef | undefined {
+  const direct = defs.find((d) => d.name === name || (d.container !== undefined && `${d.container}.${d.name}` === name));
+  if (direct) return direct;
+  const dot = name.lastIndexOf(".");
+  if (dot < 0) return undefined;
+  const owner = defs.find((d) => d.name === name.slice(0, dot) && !d.container);
+  const member = name.slice(dot + 1);
+  return owner ? defs.find((d) => d.name === member && d !== owner && d.line >= owner.line && d.endLine <= owner.endLine) : undefined;
 }

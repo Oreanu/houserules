@@ -1,6 +1,6 @@
 import path from "node:path";
 import type { Node as TSNode } from "@vscode/tree-sitter-wasm";
-import { parseTree } from "./extract.js";
+import { objectOwner, parseTree } from "./extract.js";
 
 /** A name a file imports: `import { a as b } from "./x"` binds local "b" to export "a" of "./x". */
 export interface Binding {
@@ -18,6 +18,22 @@ export interface Call {
   kind: "call" | "render" | "new";
   cond?: string; // the branch it sits in, within its function: "if <condition>", "else", "match <subject>", "catch"
   end?: number; // where the call ends in the file: on one line, `a()->b()` runs a() (ends first) before b()
+  chain?: string; // JS/TS: the whole receiver path when `callee` shortens it ("orders.checkout.forCart", "this.repo.find")
+}
+
+/**
+ * What a JS/TS file says about types, so a call on an injected service (`orders.checkout.forCart()`,
+ * `this.users.find()`) can be followed to the code behind it. Types are encoded as "T:Name" (a class, interface or
+ * type alias), "F:name" (whatever the function `name` returns: `ReturnType<typeof name>`, `name(…)`), "V:name"
+ * (whatever the variable `name` holds where it's used), or "P:<type>#prop" (a property of a type, for destructured
+ * parameters).
+ */
+export interface FileTypes {
+  vars: { name: string; type: string; from: number; to: number }[]; // `name` has `type` on lines from..to; class fields are "this.x"
+  members: { owner: string; name: string; type: string; line: number }[]; // a property of an interface, type, class or factory-made object
+  returns: { fn: string; type: string }[]; // a function's declared return type
+  implements: { cls: string; type: string }[];
+  aliases: { name: string; type: string }[]; // `type X = ReturnType<typeof f>`
 }
 
 export interface FileCalls {
@@ -25,6 +41,7 @@ export interface FileCalls {
   calls: Call[];
   defaultExport?: string; // name behind `export default` (JS/TS)
   returns?: { method: string; type: string }[]; // PHP: declared return types ("InvoiceRef.invoice" → "Invoice"), for chained calls
+  types?: FileTypes; // JS/TS only
 }
 
 /** Imports and calls in one file, for building a function-level call graph. */
@@ -45,6 +62,10 @@ export async function extractCalls(rel: string, text: string): Promise<FileCalls
       if (cond) out.calls[before]!.cond = cond;
       if (out.calls.length > before) out.calls[before]!.end = n.endIndex;
     });
+    if (lang === "js") {
+      const types = jsTypes(tree.rootNode);
+      if (types.vars.length || types.members.length || types.returns.length || types.implements.length || types.aliases.length) out.types = types;
+    }
     return out;
   } finally {
     tree.delete();
@@ -342,8 +363,10 @@ function visit(n: TSNode, lang: "js" | "python" | "java" | "php", out: FileCalls
         }
       }
     } else if (n.type === "call_expression") {
-      const callee = calleeName(n.childForFieldName("function"));
-      if (callee && callee !== "require" && callee !== "import") out.calls.push({ callee, line: line(n), kind: "call" });
+      const fn = n.childForFieldName("function");
+      const callee = calleeName(fn);
+      const chain = fn ? receiverChain(fn) : null;
+      if (callee && callee !== "require" && callee !== "import") out.calls.push({ callee, line: line(n), kind: "call", ...(chain && chain !== callee ? { chain } : {}) });
     } else if (n.type === "new_expression") {
       const callee = calleeName(n.childForFieldName("constructor"));
       if (callee) out.calls.push({ callee, line: line(n), kind: "new" });
@@ -390,4 +413,198 @@ function visit(n: TSNode, lang: "js" | "python" | "java" | "php", out: FileCalls
       if (t) out.calls.push({ callee: t.replace(/<.*$/, ""), line: line(n), kind: "new" });
     }
   }
+}
+
+/** `orders.checkout.forCart` / `this.repo.find` / `configured().orders.list`: a member path of names, else null. */
+function receiverChain(n: TSNode): string | null {
+  if (n.type === "identifier" || n.type === "this" || n.type === "property_identifier") return n.text;
+  // `configured().orders.list()`: what a plain function call returns.
+  if (n.type === "call_expression" && n.childForFieldName("function")?.type === "identifier") return `${n.childForFieldName("function")!.text}()`;
+  if (n.type === "await_expression" || n.type === "parenthesized_expression" || n.type === "non_null_expression") return n.namedChildren[0] ? receiverChain(n.namedChildren[0]) : null;
+  if (n.type !== "member_expression") return null;
+  const obj = n.childForFieldName("object");
+  const prop = n.childForFieldName("property");
+  const head = obj ? receiverChain(obj) : null;
+  return head && prop ? `${head}.${prop.text}` : null;
+}
+
+const NULLISH = /^(null|undefined|void)$/;
+
+/** A type annotation as "T:Name" / "F:fn", when it names one thing: `Catalog`, `Catalog | null`, `ReturnType<typeof createCheckout>`. */
+export function typeRef(text: string | undefined): string | undefined {
+  if (!text) return undefined;
+  let t = text.replace(/^:\s*/, "").replace(/^readonly\s+/, "").trim();
+  const parts = splitTop(t, "|").map((x) => x.trim()).filter((x) => x && !NULLISH.test(x));
+  if (parts.length !== 1) return undefined;
+  t = parts[0]!;
+  for (let m = t.match(/^(?:Promise|Awaited|Readonly|NonNullable)<([\s\S]*)>$/); m; m = t.match(/^(?:Promise|Awaited|Readonly|NonNullable)<([\s\S]*)>$/)) t = m[1]!.trim();
+  const fn = t.match(/^ReturnType<\s*typeof\s+([A-Za-z_$][\w$]*)\s*>$/);
+  if (fn) return `F:${fn[1]}`;
+  const named = t.match(/^([A-Z][\w$]*)(?:<[\s\S]*>)?$/);
+  return named ? `T:${named[1]}` : undefined;
+}
+
+/** Splits on `sep` outside <>, (), {}, []. */
+function splitTop(t: string, sep: string): string[] {
+  const out: string[] = [];
+  let depth = 0, start = 0;
+  for (let i = 0; i < t.length; i++) {
+    const ch = t[i]!;
+    if ("<({[".includes(ch)) depth++;
+    else if (">)}]".includes(ch)) depth--;
+    else if (ch === sep && depth === 0) { out.push(t.slice(start, i)); start = i + 1; }
+  }
+  out.push(t.slice(start));
+  return out;
+}
+
+/** What a value is, when the code says so plainly: `new X(…)` → "T:X", `createX(…)` → "F:createX", `x` → "V:x". */
+function valueRef(v: TSNode | null | undefined): string | undefined {
+  if (!v) return undefined;
+  if (v.type === "await_expression" || v.type === "parenthesized_expression" || v.type === "as_expression" || v.type === "satisfies_expression" || v.type === "non_null_expression") return valueRef(v.namedChildren[0]);
+  if (v.type === "new_expression") {
+    const c = v.childForFieldName("constructor");
+    return c?.type === "identifier" ? `T:${c.text}` : undefined;
+  }
+  if (v.type === "call_expression") {
+    const f = v.childForFieldName("function");
+    return f?.type === "identifier" ? `F:${f.text}` : undefined;
+  }
+  if (v.type === "identifier") return `V:${v.text}`;
+  return undefined;
+}
+
+const JS_FUNCTION = /^(function_declaration|generator_function_declaration|function_expression|function|arrow_function|method_definition|generator_function)$/;
+const JS_CLASS = /^(class_declaration|abstract_class_declaration|class)$/;
+
+function jsTypes(root: TSNode): FileTypes {
+  const out: FileTypes = { vars: [], members: [], returns: [], implements: [], aliases: [] };
+  const span = (n: TSNode) => ({ from: n.startPosition.row + 1, to: n.endPosition.row + 1 });
+  const scopeOf = (n: TSNode) => enclosing(n, JS_FUNCTION) ?? root;
+  const classOf = (n: TSNode) => enclosing(n, JS_CLASS);
+  const typeText = (n: TSNode | null) => (n ? n.text : undefined);
+  const objectMembers = (owner: string, body: TSNode) => {
+    for (const m of body.namedChildren) {
+      if (!m) continue;
+      if (m.type === "property_signature" || m.type === "public_field_definition") {
+        const name = m.childForFieldName("name")?.text;
+        const type = typeRef(typeText(m.childForFieldName("type")));
+        if (name && type) out.members.push({ owner, name, type, line: line(m) });
+      }
+    }
+  };
+  walk(root, (n) => {
+    switch (n.type) {
+      case "required_parameter":
+      case "optional_parameter": {
+        const name = n.childForFieldName("pattern");
+        const type = typeRef(typeText(n.childForFieldName("type")));
+        const fn = n.parent?.parent;
+        if (!type || !fn) break;
+        // ({ users, repo: orders }: Deps): each name is that property of the type.
+        if (name?.type === "object_pattern") {
+          for (const p of name.namedChildren) {
+            if (p?.type === "shorthand_property_identifier_pattern") out.vars.push({ name: p.text, type: `P:${type}#${p.text}`, ...span(fn) });
+            else if (p?.type === "pair_pattern" && p.childForFieldName("value")?.type === "identifier") out.vars.push({ name: p.childForFieldName("value")!.text, type: `P:${type}#${p.childForFieldName("key")!.text}`, ...span(fn) });
+          }
+          break;
+        }
+        if (name?.type !== "identifier") break;
+        out.vars.push({ name: name.text, type, ...span(fn) });
+        // constructor(private users: UserService): a field as well as a parameter.
+        const cls = classOf(n);
+        if (cls && n.namedChildren.some((c) => c?.type === "accessibility_modifier" || c?.text === "readonly")) {
+          const owner = cls.childForFieldName("name")?.text;
+          if (owner) out.members.push({ owner, name: name.text, type, line: line(n) });
+          out.vars.push({ name: `this.${name.text}`, type, ...span(cls) });
+        }
+        break;
+      }
+      case "variable_declarator": {
+        const name = n.childForFieldName("name");
+        if (name?.type !== "identifier") break;
+        const value = n.childForFieldName("value");
+        const type = typeRef(typeText(n.childForFieldName("type"))) ?? valueRef(value);
+        if (type && type !== `V:${name.text}`) out.vars.push({ name: name.text, type, ...span(scopeOf(n)) });
+        // `const createX = (…): X => …`: what the factory returns.
+        if (value && /^(arrow_function|function_expression|function)$/.test(value.type)) {
+          const ret = typeRef(typeText(value.childForFieldName("return_type")));
+          if (ret) out.returns.push({ fn: name.text, type: ret });
+        }
+        break;
+      }
+      case "function_declaration":
+      case "generator_function_declaration": {
+        const name = n.childForFieldName("name")?.text;
+        const ret = typeRef(typeText(n.childForFieldName("return_type")));
+        if (name && ret) out.returns.push({ fn: name, type: ret });
+        break;
+      }
+      case "public_field_definition":
+      case "field_definition": {
+        const cls = classOf(n);
+        const owner = cls?.childForFieldName("name")?.text;
+        const name = (n.childForFieldName("name") ?? n.childForFieldName("property"))?.text;
+        const type = typeRef(typeText(n.childForFieldName("type"))) ?? valueRef(n.childForFieldName("value"));
+        if (!cls || !owner || !name || !type) break;
+        out.members.push({ owner, name, type, line: line(n) });
+        out.vars.push({ name: `this.${name}`, type, ...span(cls) });
+        break;
+      }
+      case "assignment_expression": {
+        // this.repo = new OrderRepository(…) / this.repo = repo
+        const left = n.childForFieldName("left");
+        if (left?.type !== "member_expression" || left.childForFieldName("object")?.type !== "this") break;
+        const cls = classOf(n);
+        const owner = cls?.childForFieldName("name")?.text;
+        const name = left.childForFieldName("property")?.text;
+        const type = valueRef(n.childForFieldName("right"));
+        if (!cls || !owner || !name || !type) break;
+        const resolved = type.startsWith("V:") ? out.vars.find((v) => v.name === type.slice(2) && v.from <= line(n) && line(n) <= v.to)?.type : type;
+        if (!resolved) break;
+        out.members.push({ owner, name, type: resolved, line: line(n) });
+        out.vars.push({ name: `this.${name}`, type: resolved, ...span(cls) });
+        break;
+      }
+      case "interface_declaration": {
+        const owner = n.childForFieldName("name")?.text;
+        const body = n.childForFieldName("body");
+        if (owner && body) objectMembers(owner, body);
+        break;
+      }
+      case "type_alias_declaration": {
+        const owner = n.childForFieldName("name")?.text;
+        const value = n.childForFieldName("value");
+        if (!owner || !value) break;
+        if (value.type === "object_type") objectMembers(owner, value);
+        else {
+          const type = typeRef(value.text);
+          if (type) out.aliases.push({ name: owner, type });
+        }
+        break;
+      }
+      case "class_declaration":
+      case "abstract_class_declaration": {
+        const cls = n.childForFieldName("name")?.text;
+        const heritage = n.namedChildren.find((c) => c?.type === "class_heritage");
+        const impl = heritage?.namedChildren.find((c) => c?.type === "implements_clause");
+        for (const t of impl?.namedChildren ?? []) {
+          const type = t && typeRef(t.text);
+          if (cls && type) out.implements.push({ cls, type });
+        }
+        break;
+      }
+      case "pair":
+      case "shorthand_property_identifier": {
+        // A factory's returned object: `{ catalog: createCatalog(…), visibility }`.
+        const owner = objectOwner(n);
+        if (!owner) break;
+        const name = n.type === "pair" ? n.childForFieldName("key")?.text : n.text;
+        const type = n.type === "pair" ? valueRef(n.childForFieldName("value")) : `V:${n.text}`;
+        if (name && type) out.members.push({ owner, name, type, line: line(n) });
+        break;
+      }
+    }
+  });
+  return out;
 }

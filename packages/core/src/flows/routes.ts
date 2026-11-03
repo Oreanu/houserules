@@ -17,6 +17,7 @@ export interface Route {
   handlerFile?: string; // where the handler is defined, when it's not in `file` (Laravel controllers, imported or factory-built JS controllers)
   factory?: string; // the function that builds the handler's object (`const controller = createDeviceController(deps)`)
   pinned?: boolean; // the handler was named by the agent (describe_entry_points) and checked to exist
+  declared?: string; // the handler as the route file names it, when a pin replaced it
   inline?: [number, number]; // lines of an inline handler (Express/Laravel closures), when it has no name
   middleware?: string[]; // what runs before the handler, as written ("auth:sanctum", "can:update,order")
   name?: string; // the framework's route name ("bookings.cancel"), when it has one
@@ -123,14 +124,33 @@ export async function listRoutes(rootDir: string, analysis: Analysis): Promise<R
   try {
     const pins = (JSON.parse(await readFile(path.join(root, ".houserules", "entrypoints.json"), "utf8")) as { handlers?: Record<string, { file: string; symbol: string }> }).handlers ?? {};
     const known = new Set(analysis.files.map((f) => f.path));
-    for (const r of out) {
-      const pin = pins[r.id];
-      if (pin && known.has(pin.file)) Object.assign(r, { handler: pin.symbol, handlerFile: pin.file, pinned: true, factory: undefined, inline: undefined });
+    const byId = new Map(out.map((r) => [r.id, r]));
+    // Pins saved under the route's current id first, so they win over one saved under an older id.
+    const entries = Object.entries(pins).sort(([a], [b]) => Number(!byId.has(a)) - Number(!byId.has(b)));
+    for (const [id, pin] of entries) {
+      const r = byId.get(id) ?? renamedRoute(id, out);
+      if (!r || r.pinned || !known.has(pin.file)) continue;
+      // A pin saved under an older id, from when houserules read this route's handler wrongly: only still needed
+      // when houserules can't follow the route by itself.
+      if (r.id !== id && !UNFOLLOWED.test(r.handler)) continue;
+      Object.assign(r, { declared: r.handler, handler: pin.symbol, handlerFile: pin.file, pinned: true, factory: undefined, inline: undefined });
     }
   } catch {
     // none yet
   }
   return out.sort((a, b) => order.indexOf(a.kind) - order.indexOf(b.kind) || a.path.localeCompare(b.path));
+}
+
+// A handler label houserules couldn't turn into a function: a wrapper call it didn't see into (`guarded(…)`).
+const UNFOLLOWED = /\(…\)$/;
+
+/**
+ * The route an id saved by an older houserules now belongs to. Ids end with the handler as houserules read it, so a
+ * better reading (`guarded(…)` → `controller.create`) changes the id; the method, path and file stay the same.
+ */
+export function renamedRoute(id: string, routes: Route[]): Route | undefined {
+  const hits = routes.filter((r) => id.startsWith(`${r.kind}:${r.methods?.join(",") ?? ""}:${r.path}:${r.file}:`));
+  return hits.length === 1 ? hits[0] : undefined;
 }
 
 /** "(shop)/product/[handle]" → "/product/:handle"; route groups and parallel slots don't appear in URLs. */
@@ -609,35 +629,56 @@ async function nodeRoutes(files: string[], read: Read, lineOf: LineOf, push: Pus
 
 /**
  * A handler passed through a wrapper: `guarded("web", "read", "Route", controller.route)`, `asyncHandler(list)`,
- * `catchErrors((req, res) => …)`. The function inside is what runs, so trace that; the wrapper itself (usually
- * an auth or error guard) is kept as middleware, as written. A factory with no function inside (`cors()`) stays.
+ * `catchErrors((req, res) => …)`, `guarded(…, controller.create, "order.create")`, `publicRoute("why",
+ * controller.login, noAudit("…"))`, curried `guarded("web", "read", "Profile")(profiles.route)`. The function inside is
+ * what runs, so trace that; the wrapper itself (usually an auth or error guard) is kept as middleware, as written. A
+ * factory with no function inside (`cors()`) stays.
  */
 function unwrapHandler(arg: { text: string; start: number }): { handler: { text: string; start: number }; wrappers: string[] } {
   const wrappers: string[] = [];
   let cur = arg;
   for (let depth = 0; depth < 4; depth++) {
+    // A reference is the handler itself, `.bind(…)` included: `profiles.route.bind(profiles)` is not a wrapper around `profiles`.
+    if (isInlineFn(cur.text) || isFnRef(cur.text)) break;
     const call = cur.text.match(/^(?:await\s+)?([\w$.]+)\s*\(/);
-    if (!call || isInlineFn(cur.text) || !cur.text.trimEnd().endsWith(")")) break;
-    const open = cur.text.indexOf("(", call.index! + call[0].length - 1);
-    const inner = callArgs(cur.text, open);
-    // The function passed in: an inline function, or a reference (`controller.route`, `list`), last one wins.
-    // Wrappers take the function last (guarded(..., controller.route), asyncHandler(list)). A bare name only counts
-    // when the wrapper is named like one: swaggerUi.setup(specs, {...}) passes data, not a handler.
-    const lastArg = inner[inner.length - 1];
-    const t = lastArg?.text.trim() ?? "";
+    if (!call) break;
+    // Every argument group of the call: one for `guarded(…)`, two for a curried `guarded(…)(handler)`.
+    let open = cur.text.indexOf("(", call.index! + call[0].length - 1);
+    const groups = [callArgs(cur.text, open)];
+    let close = matchBracket(cur.text, open);
+    for (let next = cur.text.slice(close + 1).match(/^\s*\(/); next; next = cur.text.slice(close + 1).match(/^\s*\(/)) {
+      open = close + next[0].length;
+      groups.push(callArgs(cur.text, open));
+      close = matchBracket(cur.text, open);
+    }
+    if (close !== cur.text.trimEnd().length - 1) break; // `wrap(x).then(…)`: not a plain wrapper call
+    const all = groups.flat();
+    const inner = groups[groups.length - 1]!;
+    // The function passed in, wherever it sits: strings, numbers, option objects and option builders
+    // (`noAudit("…")`) around it are settings. Last one wins.
+    const refs = inner.filter((a) => isInlineFn(a.text) || isFnRef(a.text));
+    // A bare name or a wrapper inside a wrapper (asyncHandler(list), asyncHandler(guarded(…, controller.route))) only
+    // counts when the wrapper is named like one: swaggerUi.setup(specs, {...}) passes data, not a handler.
     const wrapperName = /handler|async|wrap|catch|guard|safe|try|protect|route|controller/i.test(call[1]!);
-    const fn =
-      lastArg && (isInlineFn(t) || /^[A-Za-z_$][\w$]*(\.[\w$]+)+(\.bind\([^)]*\))?$/.test(t) || /^[A-Za-z_$][\w$]*\.bind\(/.test(t) || (wrapperName && /^[A-Za-z_$][\w$]*$/.test(t) && !/^(true|false|null|undefined)$/.test(t)))
-        ? lastArg
-        : // asyncHandler(guarded("web", controller.route)): the last argument is another wrapper; look inside it.
-          lastArg && wrapperName && /^[\w$.]+\s*\([\s\S]*\)$/.test(t)
-          ? lastArg
-          : undefined;
+    const isCall = (t: string) => /^(?:await\s+)?[\w$.]+\s*\([\s\S]*\)$/.test(t);
+    const nested = wrapperName ? inner.filter((a) => isCall(a.text) && unwrapHandler(a).wrappers.length > 0 && isFnLike(unwrapHandler(a).handler.text)) : [];
+    const last = inner[inner.length - 1];
+    const bare = wrapperName && last && /^[A-Za-z_$][\w$]*$/.test(last.text) && !/^(true|false|null|undefined)$/.test(last.text) ? last : undefined;
+    const fn = refs[refs.length - 1] ?? nested[nested.length - 1] ?? bare ?? (wrapperName && last && isCall(last.text) ? last : undefined);
     if (!fn) break;
-    wrappers.push(guardName(call[1]!, inner.filter((a) => a !== fn)));
+    wrappers.push(guardName(call[1]!, all.filter((a) => a !== fn)));
     cur = { text: fn.text.trim(), start: cur.start + fn.start };
   }
   return { handler: cur, wrappers };
+}
+
+/** `controller.route`, `this.list.bind(this)`, `profiles.route.bind(profiles)`, `list.bind(ctx)`: a function passed by reference. */
+function isFnRef(t: string): boolean {
+  return /^[A-Za-z_$][\w$]*(\.[\w$]+)+(\.bind\([^()]*\))?$/.test(t) || /^[A-Za-z_$][\w$]*\.bind\([^()]*\)$/.test(t);
+}
+
+function isFnLike(t: string): boolean {
+  return isInlineFn(t) || isFnRef(t);
 }
 
 /**
